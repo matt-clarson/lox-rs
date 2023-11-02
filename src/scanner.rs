@@ -358,7 +358,7 @@ fn char_is_digit(c: char) -> bool {
 }
 
 /// Metadata for a token, relative to the input source.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct TokenMeta {
     /// The first index position of the lexeme.
     pub start: usize,
@@ -375,7 +375,7 @@ impl Display for TokenMeta {
 }
 
 /// Represents a single lexeme of the lox language.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Token {
     // Single-character tokens.
     LeftParen(TokenMeta),
@@ -421,8 +421,98 @@ pub enum Token {
     While(TokenMeta),
 }
 
+impl Token {
+    pub fn meta(&self) -> TokenMeta {
+        match self {
+            Self::LeftParen(t) => *t,
+            Self::RightParen(t) => *t,
+            Self::LeftBrace(t) => *t,
+            Self::RightBrace(t) => *t,
+            Self::Comma(t) => *t,
+            Self::Dot(t) => *t,
+            Self::Minus(t) => *t,
+            Self::Plus(t) => *t,
+            Self::Semicolon(t) => *t,
+            Self::Slash(t) => *t,
+            Self::Star(t) => *t,
+            Self::Bang(t) => *t,
+            Self::BangEqual(t) => *t,
+            Self::Equal(t) => *t,
+            Self::EqualEqual(t) => *t,
+            Self::Greater(t) => *t,
+            Self::GreaterEqual(t) => *t,
+            Self::Less(t) => *t,
+            Self::LessEqual(t) => *t,
+            Self::Identifier(t) => *t,
+            Self::String(t) => *t,
+            Self::Number(t) => *t,
+            Self::And(t) => *t,
+            Self::Class(t) => *t,
+            Self::Else(t) => *t,
+            Self::False(t) => *t,
+            Self::For(t) => *t,
+            Self::Fun(t) => *t,
+            Self::If(t) => *t,
+            Self::Nil(t) => *t,
+            Self::Or(t) => *t,
+            Self::Print(t) => *t,
+            Self::Return(t) => *t,
+            Self::Super(t) => *t,
+            Self::This(t) => *t,
+            Self::True(t) => *t,
+            Self::Var(t) => *t,
+            Self::While(t) => *t,
+        }
+    }
+}
+
+impl Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LeftParen(t) => write!(f, "'(' at {t}"),
+            Self::RightParen(t) => write!(f, "')' at {t}"),
+            Self::LeftBrace(t) => write!(f, "'{{' at {t}"),
+            Self::RightBrace(t) => write!(f, "'}}' at {t}"),
+            Self::Comma(t) => write!(f, "',' at {t}"),
+            Self::Dot(t) => write!(f, "'.' at {t}"),
+            Self::Minus(t) => write!(f, "'-' at {t}"),
+            Self::Plus(t) => write!(f, "'+' at {t}"),
+            Self::Semicolon(t) => write!(f, "';' at {t}"),
+            Self::Slash(t) => write!(f, "'/' at {t}"),
+            Self::Star(t) => write!(f, "'*' at {t}"),
+            Self::Bang(t) => write!(f, "'!' at {t}"),
+            Self::BangEqual(t) => write!(f, "'!=' at {t}"),
+            Self::Equal(t) => write!(f, "'=' at {t}"),
+            Self::EqualEqual(t) => write!(f, "'==' at {t}"),
+            Self::Greater(t) => write!(f, "'>' at {t}"),
+            Self::GreaterEqual(t) => write!(f, "'>=' at {t}"),
+            Self::Less(t) => write!(f, "'<' at {t}"),
+            Self::LessEqual(t) => write!(f, "'<=' at {t}"),
+            Self::Identifier(t) => write!(f, "<identifier> at {t}"),
+            Self::String(t) => write!(f, "<string> at {t}"),
+            Self::Number(t) => write!(f, "<number> at {t}"),
+            Self::And(t) => write!(f, "'and' at {t}"),
+            Self::Class(t) => write!(f, "'class' at {t}"),
+            Self::Else(t) => write!(f, "'else' at {t}"),
+            Self::False(t) => write!(f, "'false' at {t}"),
+            Self::For(t) => write!(f, "'for' at {t}"),
+            Self::Fun(t) => write!(f, "'fun' at {t}"),
+            Self::If(t) => write!(f, "'if' at {t}"),
+            Self::Nil(t) => write!(f, "'nil' at {t}"),
+            Self::Or(t) => write!(f, "'or' at {t}"),
+            Self::Print(t) => write!(f, "'print' at {t}"),
+            Self::Return(t) => write!(f, "'return' at {t}"),
+            Self::Super(t) => write!(f, "'super' at {t}"),
+            Self::This(t) => write!(f, "'this' at {t}"),
+            Self::True(t) => write!(f, "'true' at {t}"),
+            Self::Var(t) => write!(f, "'var' at {t}"),
+            Self::While(t) => write!(f, "'while' at {t}"),
+        }
+    }
+}
+
 /// All error states that can arise while scanning in input string.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScanError {
     /// Raised when the EOF marker is reached before the closing `"` character of a string.
     UnterminatedString(TokenMeta),

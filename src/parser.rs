@@ -2,7 +2,7 @@ use std::{error::Error, fmt::Display, iter::Peekable};
 
 use crate::{
     ast::*,
-    scanner::{ScanError, Scanner, Token, TokenMeta},
+    scanner::{ScanError, Scanner, Token, Span},
 };
 
 /// Uses a source of scanned [tokens](crate::scanner::Token) to output an AST, as a stream of
@@ -158,12 +158,12 @@ impl<'s> Parser<'s> {
 
     fn unary(&mut self) -> ParseResult<Expression> {
         match self.peek_next()? {
-            &Token::Minus(operator) => Ok(Expression::Unary(Unary::Negate(UnaryExpression {
-                operator,
+            Token::Minus(operator) => Ok(Expression::Unary(Unary::Negate(UnaryExpression {
+                operator: *operator,
                 expr: Box::new(self.advance().and_then(|_| self.primary())?),
             }))),
-            &Token::Bang(operator) => Ok(Expression::Unary(Unary::Not(UnaryExpression {
-                operator,
+            Token::Bang(operator) => Ok(Expression::Unary(Unary::Not(UnaryExpression {
+                operator: *operator,
                 expr: Box::new(self.advance().and_then(|_| self.primary())?),
             }))),
             _ => self.primary(),
@@ -191,7 +191,7 @@ impl<'s> Parser<'s> {
         })
     }
 
-    fn take_right_paren(&mut self) -> ParseResult<TokenMeta> {
+    fn take_right_paren(&mut self) -> ParseResult<Span> {
         self.advance().and_then(|token| match token {
             Token::RightParen(t) => Ok(t),
             _ => Err(ParseError::WrongToken(WrongToken {
@@ -257,7 +257,7 @@ impl Error for ParseError {}
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::scanner::{Scanner, TokenMeta};
+    use crate::scanner::{Scanner, Span};
 
     #[test]
     fn parse_number_literal() {
@@ -270,7 +270,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::Number(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 3,
                     line: 1
@@ -290,7 +290,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::String(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 7,
                     line: 1
@@ -310,7 +310,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::Ident(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 1,
                     line: 1
@@ -330,7 +330,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::Nil(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 3,
                     line: 1
@@ -350,7 +350,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::True(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 4,
                     line: 1
@@ -370,7 +370,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::False(
-                TokenMeta {
+                Span {
                     start: 0,
                     length: 5,
                     line: 1
@@ -391,12 +391,12 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Unary(Unary::Negate(
                 UnaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 0,
                         length: 1,
                         line: 1
                     },
-                    expr: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    expr: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 1,
                         length: 1,
                         line: 1
@@ -418,12 +418,12 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Unary(Unary::Not(
                 UnaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 0,
                         length: 1,
                         line: 1
                     },
-                    expr: Box::new(Expression::Primary(Primary::Ident(TokenMeta {
+                    expr: Box::new(Expression::Primary(Primary::Ident(Span {
                         start: 1,
                         length: 1,
                         line: 1
@@ -445,29 +445,29 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Factor(Factor::Divide(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 6,
                         length: 1,
                         line: 1
                     },
                     left: Box::new(Expression::Factor(Factor::Divide(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 2,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
@@ -489,29 +489,29 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Factor(Factor::Multiply(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 6,
                         length: 1,
                         line: 1
                     },
                     left: Box::new(Expression::Factor(Factor::Multiply(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 2,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
@@ -533,30 +533,30 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Factor(Factor::Multiply(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 3,
                         length: 1,
                         line: 1
                     },
                     left: Box::new(Expression::Unary(Unary::Negate(UnaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 0,
                             length: 1,
                             line: 1,
                         },
-                        expr: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        expr: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 1,
                             length: 1,
                             line: 1,
                         }))),
                     }))),
                     right: Box::new(Expression::Unary(Unary::Negate(UnaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 5,
                             length: 1,
                             line: 1,
                         },
-                        expr: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        expr: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 6,
                             length: 1,
                             line: 1,
@@ -579,29 +579,29 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Term(Term::Minus(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 6,
                         length: 1,
                         line: 1
                     },
                     left: Box::new(Expression::Term(Term::Minus(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 2,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
@@ -623,29 +623,29 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Term(Term::Plus(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 6,
                         length: 1,
                         line: 1
                     },
                     left: Box::new(Expression::Term(Term::Plus(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 2,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
@@ -667,28 +667,28 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Term(Term::Plus(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 1,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
                     right: Box::new(Expression::Factor(Factor::Divide(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 6,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 8,
                             length: 1,
                             line: 1,
@@ -711,17 +711,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Comparison(
                 Comparison::LessThan(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 1,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 4,
                         length: 1,
                         line: 1,
@@ -743,17 +743,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Comparison(
                 Comparison::LessThanOrEquals(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 2,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 5,
                         length: 1,
                         line: 1,
@@ -775,17 +775,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Comparison(
                 Comparison::GreaterThan(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 1,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 4,
                         length: 1,
                         line: 1,
@@ -807,17 +807,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Comparison(
                 Comparison::GreaterThanOrEquals(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 2,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 5,
                         length: 1,
                         line: 1,
@@ -839,28 +839,28 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Comparison(
                 Comparison::GreaterThan(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 1,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
                     right: Box::new(Expression::Term(Term::Minus(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 6,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 8,
                             length: 1,
                             line: 1,
@@ -883,17 +883,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Equality(Equality::Equals(
                 BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 2,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 5,
                         length: 1,
                         line: 1,
@@ -915,17 +915,17 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Equality(
                 Equality::NotEquals(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 2,
                         length: 2,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 5,
                         length: 1,
                         line: 1,
@@ -947,29 +947,29 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Equality(
                 Equality::NotEquals(BinaryExpression {
-                    operator: TokenMeta {
+                    operator: Span {
                         start: 5,
                         length: 2,
                         line: 1
                     },
-                    left: Box::new(Expression::Primary(Primary::True(TokenMeta {
+                    left: Box::new(Expression::Primary(Primary::True(Span {
                         start: 0,
                         length: 4,
                         line: 1,
                     }))),
                     right: Box::new(Expression::Comparison(Comparison::GreaterThan(
                         BinaryExpression {
-                            operator: TokenMeta {
+                            operator: Span {
                                 start: 10,
                                 length: 1,
                                 line: 1,
                             },
-                            left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                            left: Box::new(Expression::Primary(Primary::Number(Span {
                                 start: 8,
                                 length: 1,
                                 line: 1,
                             }))),
-                            right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                            right: Box::new(Expression::Primary(Primary::Number(Span {
                                 start: 12,
                                 length: 1,
                                 line: 1,
@@ -993,28 +993,28 @@ mod test {
             parser.next(),
             Some(Ok(Statement::Expr(Expression::Primary(Primary::Group(
                 GroupedExpression {
-                    start: TokenMeta {
+                    start: Span {
                         start: 0,
                         length: 1,
                         line: 1
                     },
-                    end: TokenMeta {
+                    end: Span {
                         start: 6,
                         length: 1,
                         line: 1
                     },
                     expr: Box::new(Expression::Term(Term::Plus(BinaryExpression {
-                        operator: TokenMeta {
+                        operator: Span {
                             start: 3,
                             length: 1,
                             line: 1,
                         },
-                        left: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 1,
                             length: 1,
                             line: 1,
                         }))),
-                        right: Box::new(Expression::Primary(Primary::Number(TokenMeta {
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 5,
                             length: 1,
                             line: 1,

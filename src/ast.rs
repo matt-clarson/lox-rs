@@ -1,4 +1,4 @@
-use crate::scanner::TokenMeta;
+use crate::scanner::Span;
 
 /// A complete statement of the language - this is the highest type of node in the AST.
 #[derive(Debug, Eq, PartialEq)]
@@ -59,14 +59,14 @@ pub enum Unary {
 pub struct BinaryExpression {
     pub left: Box<Expression>,
     pub right: Box<Expression>,
-    pub operator: TokenMeta,
+    pub operator: Span,
 }
 
 /// Contains info needed to represent a generic unary expression.
 #[derive(Debug, Eq, PartialEq)]
 pub struct UnaryExpression {
     pub expr: Box<Expression>,
-    pub operator: TokenMeta,
+    pub operator: Span,
 }
 
 /// The smallest expression unit, literals, identifiers, and grouped expressions.
@@ -74,19 +74,19 @@ pub struct UnaryExpression {
 /// Groups are included in `Primary` to ensure correct precedence.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Primary {
-    String(TokenMeta),
-    Number(TokenMeta),
-    Ident(TokenMeta),
-    Nil(TokenMeta),
-    True(TokenMeta),
-    False(TokenMeta),
+    String(Span),
+    Number(Span),
+    Ident(Span),
+    Nil(Span),
+    True(Span),
+    False(Span),
     Group(GroupedExpression),
 }
 
 /// Contains info needed to represent a grouped expression.
 #[derive(Debug, Eq, PartialEq)]
 pub struct GroupedExpression {
-    pub start: TokenMeta,
-    pub end: TokenMeta,
+    pub start: Span,
+    pub end: Span,
     pub expr: Box<Expression>,
 }

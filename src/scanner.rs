@@ -69,7 +69,7 @@ impl<'c> Scanner<'c> {
         let next_is_slash = self.advance_if_next_equals('/').is_some();
 
         if !next_is_slash {
-            let token_meta = TokenMeta {
+            let token_meta = Span {
                 length: 1,
                 line: self.line,
                 start: i,
@@ -108,7 +108,7 @@ impl<'c> Scanner<'c> {
     fn scan_identifier(&mut self) -> ScanResult {
         let (i, c) = self.check_current(char_is_ident_start)?;
 
-        let mut token_meta = TokenMeta {
+        let mut token_meta = Span {
             length: 1,
             line: self.line,
             start: i,
@@ -157,9 +157,9 @@ impl<'c> Scanner<'c> {
         }
     }
 
-    fn check_keyword<F: FnOnce(TokenMeta) -> Token>(
+    fn check_keyword<F: FnOnce(Span) -> Token>(
         &mut self,
-        token_meta: &mut TokenMeta,
+        token_meta: &mut Span,
         rest: &str,
         f: F,
     ) -> ScanResult {
@@ -182,7 +182,7 @@ impl<'c> Scanner<'c> {
         }
     }
 
-    fn finish_identifier(&mut self, token_meta: &mut TokenMeta) -> ScanResult {
+    fn finish_identifier(&mut self, token_meta: &mut Span) -> ScanResult {
         while let Some((_, c)) = self.advance() {
             if !char_is_ident_part(c) {
                 break;
@@ -197,7 +197,7 @@ impl<'c> Scanner<'c> {
     fn scan_number_literal(&mut self) -> ScanResult {
         let (i, _) = self.check_current(char_is_digit)?;
 
-        let mut token_meta = TokenMeta {
+        let mut token_meta = Span {
             length: 1,
             line: self.line,
             start: i,
@@ -231,7 +231,7 @@ impl<'c> Scanner<'c> {
     fn scan_string_literal(&mut self) -> ScanResult {
         let (i, _) = self.check_current_equals('"')?;
 
-        let mut token_meta = TokenMeta {
+        let mut token_meta = Span {
             length: 1,
             line: self.line,
             start: i,
@@ -261,11 +261,11 @@ impl<'c> Scanner<'c> {
 
     fn scan_with_equals<F1, F2>(&mut self, c: char, f1: F1, f2: F2) -> ScanResult
     where
-        F1: FnOnce(TokenMeta) -> Token,
-        F2: FnOnce(TokenMeta) -> Token,
+        F1: FnOnce(Span) -> Token,
+        F2: FnOnce(Span) -> Token,
     {
         let (i, _) = self.check_current_equals(c)?;
-        let mut token_meta = TokenMeta {
+        let mut token_meta = Span {
             length: 1,
             line: self.line,
             start: i,
@@ -285,7 +285,7 @@ impl<'c> Scanner<'c> {
 
     fn scan_single_char_token(&mut self) -> ScanResult {
         let result = self.current.map(|(i, c)| {
-            let token_meta = TokenMeta {
+            let token_meta = Span {
                 length: 1,
                 line: self.line,
                 start: i,
@@ -357,9 +357,9 @@ fn char_is_digit(c: char) -> bool {
     c.is_ascii_digit()
 }
 
-/// Metadata for a token, relative to the input source.
+/// Positional data for a token, relative to the input source.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct TokenMeta {
+pub struct Span {
     /// The first index position of the lexeme.
     pub start: usize,
     /// The total character length of the lexeme.
@@ -368,9 +368,16 @@ pub struct TokenMeta {
     pub line: usize,
 }
 
-impl Display for TokenMeta {
+impl Display for Span {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.line, self.start + 1)
+    }
+}
+
+impl Default for Span {
+    /// Used for testing purposes.
+    fn default() -> Self {
+        Self {start: 0, length: 0, line: 0}
     }
 }
 
@@ -378,51 +385,51 @@ impl Display for TokenMeta {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Token {
     // Single-character tokens.
-    LeftParen(TokenMeta),
-    RightParen(TokenMeta),
-    LeftBrace(TokenMeta),
-    RightBrace(TokenMeta),
-    Comma(TokenMeta),
-    Dot(TokenMeta),
-    Minus(TokenMeta),
-    Plus(TokenMeta),
-    Semicolon(TokenMeta),
-    Slash(TokenMeta),
-    Star(TokenMeta),
+    LeftParen(Span),
+    RightParen(Span),
+    LeftBrace(Span),
+    RightBrace(Span),
+    Comma(Span),
+    Dot(Span),
+    Minus(Span),
+    Plus(Span),
+    Semicolon(Span),
+    Slash(Span),
+    Star(Span),
     // One or two character tokens.
-    Bang(TokenMeta),
-    BangEqual(TokenMeta),
-    Equal(TokenMeta),
-    EqualEqual(TokenMeta),
-    Greater(TokenMeta),
-    GreaterEqual(TokenMeta),
-    Less(TokenMeta),
-    LessEqual(TokenMeta),
+    Bang(Span),
+    BangEqual(Span),
+    Equal(Span),
+    EqualEqual(Span),
+    Greater(Span),
+    GreaterEqual(Span),
+    Less(Span),
+    LessEqual(Span),
     // Literals.
-    Identifier(TokenMeta),
-    String(TokenMeta),
-    Number(TokenMeta),
+    Identifier(Span),
+    String(Span),
+    Number(Span),
     // Keywords.
-    And(TokenMeta),
-    Class(TokenMeta),
-    Else(TokenMeta),
-    False(TokenMeta),
-    For(TokenMeta),
-    Fun(TokenMeta),
-    If(TokenMeta),
-    Nil(TokenMeta),
-    Or(TokenMeta),
-    Print(TokenMeta),
-    Return(TokenMeta),
-    Super(TokenMeta),
-    This(TokenMeta),
-    True(TokenMeta),
-    Var(TokenMeta),
-    While(TokenMeta),
+    And(Span),
+    Class(Span),
+    Else(Span),
+    False(Span),
+    For(Span),
+    Fun(Span),
+    If(Span),
+    Nil(Span),
+    Or(Span),
+    Print(Span),
+    Return(Span),
+    Super(Span),
+    This(Span),
+    True(Span),
+    Var(Span),
+    While(Span),
 }
 
 impl Token {
-    pub fn meta(&self) -> TokenMeta {
+    pub fn meta(&self) -> Span {
         match self {
             Self::LeftParen(t) => *t,
             Self::RightParen(t) => *t,
@@ -515,9 +522,9 @@ impl Display for Token {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScanError {
     /// Raised when the EOF marker is reached before the closing `"` character of a string.
-    UnterminatedString(TokenMeta),
+    UnterminatedString(Span),
     /// Raised when an unrecognised character is encountered outside of a string literal.
-    UnrecognisedCharacter(char, TokenMeta),
+    UnrecognisedCharacter(char, Span),
 }
 
 impl Display for ScanError {
@@ -606,15 +613,15 @@ mod test {
 
         assert_matches!(
             scanner.next(),
-            Some(Ok(Token::Bang(TokenMeta { line: 1, .. })))
+            Some(Ok(Token::Bang(Span { line: 1, .. })))
         );
         assert_matches!(
             scanner.next(),
-            Some(Ok(Token::Bang(TokenMeta { line: 2, .. })))
+            Some(Ok(Token::Bang(Span { line: 2, .. })))
         );
         assert_matches!(
             scanner.next(),
-            Some(Ok(Token::Bang(TokenMeta { line: 3, .. })))
+            Some(Ok(Token::Bang(Span { line: 3, .. })))
         );
         assert_matches!(scanner.next(), None);
     }

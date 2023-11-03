@@ -23,30 +23,26 @@ use crate::scanner::Span;
 ///     Op::Return,
 /// ];
 ///
-/// let mut vm = VirtualMachine::from(instructions.into_iter());
+/// let mut vm = VirtualMachine::new();
+/// vm.load(&instructions);
 ///
 /// assert_eq!(vm.next(), Some(Ok(Value::Number(10.0))));
 /// assert_eq!(vm.next(), None);
 /// ```
-pub struct VirtualMachine<I: Iterator<Item = Op>> {
-    ops: I,
+pub struct VirtualMachine<'v, I: Iterator<Item = &'v Op>> {
+    ops: Option<I>,
     stack: Stack,
     errored: bool,
     debug: bool,
 }
 
-impl<I: Iterator<Item = Op>> From<I> for VirtualMachine<I> {
-    fn from(ops: I) -> Self {
-        Self {
-            ops,
-            stack: Stack::new(),
-            errored: false,
-            debug: false,
-        }
+impl <'v, I: Iterator<Item = &'v Op>> Default for VirtualMachine<'v, I> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl<I: Iterator<Item = Op>> Iterator for VirtualMachine<I> {
+impl<'v, I: Iterator<Item = &'v Op>> Iterator for VirtualMachine<'v, I> {
     type Item = Result<Value, VmError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -54,9 +50,9 @@ impl<I: Iterator<Item = Op>> Iterator for VirtualMachine<I> {
             return None;
         }
 
-        while let Some(op) = self.ops.next() {
+        while let Some(op) = self.ops.as_mut()?.next() {
             if self.debug {
-                self.print_debug(&op);
+                self.print_debug(op);
             }
 
             let r = self.process_op(op);
@@ -74,11 +70,26 @@ impl<I: Iterator<Item = Op>> Iterator for VirtualMachine<I> {
     }
 }
 
-impl<I: Iterator<Item = Op>> VirtualMachine<I> {
-    fn process_op(&mut self, op: Op) -> Result<Option<Value>, VmError> {
+impl<'v, I: Iterator<Item = &'v Op>> VirtualMachine<'v, I> {
+    pub fn new() -> Self {
+        Self {
+            ops: None,
+            stack: Stack::new(),
+            errored: false,
+            debug: false,
+        }
+    }
+
+    /// Loads a new set of operations into the VM. These can then be executed using the VM
+    /// [Iterator] implementation.
+    pub fn load<T: IntoIterator<IntoIter = I>>(&mut self, ops: T) {
+        self.ops = Some(ops.into_iter());
+    }
+
+    fn process_op(&mut self, op: &Op) -> Result<Option<Value>, VmError> {
         match op {
             Op::Constant(value) => {
-                self.stack.push(value);
+                self.stack.push(*value);
                 Ok(None)
             }
             Op::Not(_) => match self.stack.peek_mut() {
@@ -190,6 +201,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
 }
 
 /// Bytecode operations used by the [VM](VirtualMachine).
+#[derive(Debug, PartialEq)]
 pub enum Op {
     /// Pops the top value from the stack to be returned to the caller.
     Return,
@@ -276,7 +288,7 @@ impl Stack {
 
 impl Display for Stack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (i, value) in self.values.iter().enumerate() {
+        for (i, value) in self.values.iter().enumerate().rev() {
             writeln!(f, "[{i:04}\t{value}]")?;
         }
         Ok(())
@@ -285,7 +297,7 @@ impl Display for Stack {
 
 /// Represents a storable value, which can be moved on and off the [VM](VirtualMachine)'s internal
 /// stack.
-#[derive(Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Value {
     /// A numerical, floating-point value.
     Number(f64),
@@ -359,7 +371,8 @@ mod test {
     fn push_and_pop_number() {
         let instructions = vec![Op::Constant(Value::Number(6.4)), Op::Return];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(6.4))));
         assert_eq!(vm.next(), None);
@@ -376,7 +389,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
@@ -391,7 +405,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -408,7 +423,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(-1.0))));
         assert_eq!(vm.next(), None);
@@ -422,7 +438,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -440,7 +457,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(10.0))));
         assert_eq!(vm.next(), None);
@@ -455,7 +473,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -473,7 +492,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(1.0))));
         assert_eq!(vm.next(), None);
@@ -488,7 +508,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -506,7 +527,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(20.0))));
         assert_eq!(vm.next(), None);
@@ -521,7 +543,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -539,7 +562,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(5.0))));
         assert_eq!(vm.next(), None);
@@ -554,7 +578,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -580,7 +605,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
@@ -597,7 +623,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -623,7 +650,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
@@ -640,7 +668,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -666,7 +695,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
@@ -683,7 +713,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -709,7 +740,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
@@ -726,7 +758,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(
             vm.next(),
@@ -760,7 +793,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
@@ -795,7 +829,8 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::from(instructions.into_iter());
+        let mut vm = VirtualMachine::new();
+        vm.load(&instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));

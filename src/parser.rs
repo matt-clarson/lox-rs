@@ -2,7 +2,7 @@ use std::{error::Error, fmt::Display, iter::Peekable};
 
 use crate::{
     ast::*,
-    scanner::{ScanError, Scanner, Token, Span},
+    scanner::{ScanError, Scanner, Span, Token},
 };
 
 /// Uses a source of scanned [tokens](crate::scanner::Token) to output an AST, as a stream of
@@ -35,7 +35,8 @@ type ParseResult<T> = Result<T, ParseError>;
 
 impl<'s> Parser<'s> {
     fn statement(&mut self) -> ParseResult<Statement> {
-        self.expression().map(Statement::Expr)
+        self.expression()
+            .and_then(|expr| self.take_semicolon().map(|_| expr.into()))
     }
 
     fn expression(&mut self) -> ParseResult<Expression> {
@@ -191,6 +192,16 @@ impl<'s> Parser<'s> {
         })
     }
 
+    fn take_semicolon(&mut self) -> ParseResult<Span> {
+        self.advance().and_then(|token| match token {
+            Token::Semicolon(t) => Ok(t),
+            _ => Err(ParseError::WrongToken(WrongToken {
+                wanted: ";",
+                actual: token,
+            })),
+        })
+    }
+
     fn take_right_paren(&mut self) -> ParseResult<Span> {
         self.advance().and_then(|token| match token {
             Token::RightParen(t) => Ok(t),
@@ -261,7 +272,7 @@ mod test {
 
     #[test]
     fn parse_number_literal() {
-        let s = "4.8";
+        let s = "4.8;";
 
         let scanner = Scanner::from(s);
 
@@ -281,7 +292,7 @@ mod test {
 
     #[test]
     fn parse_string_literal() {
-        let s = "\"hello\"";
+        let s = "\"hello\";";
 
         let scanner = Scanner::from(s);
 
@@ -301,7 +312,7 @@ mod test {
 
     #[test]
     fn parse_identifier() {
-        let s = "x";
+        let s = "x;";
 
         let scanner = Scanner::from(s);
 
@@ -321,7 +332,7 @@ mod test {
 
     #[test]
     fn parse_nil() {
-        let s = "nil";
+        let s = "nil;";
 
         let scanner = Scanner::from(s);
 
@@ -341,7 +352,7 @@ mod test {
 
     #[test]
     fn parse_true() {
-        let s = "true";
+        let s = "true;";
 
         let scanner = Scanner::from(s);
 
@@ -361,7 +372,7 @@ mod test {
 
     #[test]
     fn parse_false() {
-        let s = "false";
+        let s = "false;";
 
         let scanner = Scanner::from(s);
 
@@ -381,7 +392,7 @@ mod test {
 
     #[test]
     fn parse_unary_negate() {
-        let s = "-9";
+        let s = "-9;";
 
         let scanner = Scanner::from(s);
 
@@ -408,7 +419,7 @@ mod test {
 
     #[test]
     fn parse_unary_not() {
-        let s = "!y";
+        let s = "!y;";
 
         let scanner = Scanner::from(s);
 
@@ -435,7 +446,7 @@ mod test {
 
     #[test]
     fn parse_division() {
-        let s = "8 / 4 / 2";
+        let s = "8 / 4 / 2;";
 
         let scanner = Scanner::from(s);
 
@@ -479,7 +490,7 @@ mod test {
 
     #[test]
     fn parse_multiplication() {
-        let s = "8 * 4 * 2";
+        let s = "8 * 4 * 2;";
 
         let scanner = Scanner::from(s);
 
@@ -523,7 +534,7 @@ mod test {
 
     #[test]
     fn parse_unary_factor_precedence() {
-        let s = "-8 * -9";
+        let s = "-8 * -9;";
 
         let scanner = Scanner::from(s);
 
@@ -569,7 +580,7 @@ mod test {
 
     #[test]
     fn parse_subtraction() {
-        let s = "8 - 4 - 2";
+        let s = "8 - 4 - 2;";
 
         let scanner = Scanner::from(s);
 
@@ -613,7 +624,7 @@ mod test {
 
     #[test]
     fn parse_addition() {
-        let s = "8 + 4 + 2";
+        let s = "8 + 4 + 2;";
 
         let scanner = Scanner::from(s);
 
@@ -657,7 +668,7 @@ mod test {
 
     #[test]
     fn parse_term_factor_precedence() {
-        let s = "8 + 4 / 2";
+        let s = "8 + 4 / 2;";
 
         let scanner = Scanner::from(s);
 
@@ -701,7 +712,7 @@ mod test {
 
     #[test]
     fn parse_comparison_less() {
-        let s = "8 < 4";
+        let s = "8 < 4;";
 
         let scanner = Scanner::from(s);
 
@@ -733,7 +744,7 @@ mod test {
 
     #[test]
     fn parse_comparison_less_or_equals() {
-        let s = "8 <= 4";
+        let s = "8 <= 4;";
 
         let scanner = Scanner::from(s);
 
@@ -765,7 +776,7 @@ mod test {
 
     #[test]
     fn parse_comparison_greater() {
-        let s = "8 > 4";
+        let s = "8 > 4;";
 
         let scanner = Scanner::from(s);
 
@@ -797,7 +808,7 @@ mod test {
 
     #[test]
     fn parse_comparison_greater_or_equals() {
-        let s = "8 >= 4";
+        let s = "8 >= 4;";
 
         let scanner = Scanner::from(s);
 
@@ -829,7 +840,7 @@ mod test {
 
     #[test]
     fn parse_comparison_term_precedence() {
-        let s = "8 > 4 - 2";
+        let s = "8 > 4 - 2;";
 
         let scanner = Scanner::from(s);
 
@@ -873,7 +884,7 @@ mod test {
 
     #[test]
     fn parse_equality() {
-        let s = "8 == 4";
+        let s = "8 == 4;";
 
         let scanner = Scanner::from(s);
 
@@ -905,7 +916,7 @@ mod test {
 
     #[test]
     fn parse_inequality() {
-        let s = "8 != 4";
+        let s = "8 != 4;";
 
         let scanner = Scanner::from(s);
 
@@ -937,7 +948,7 @@ mod test {
 
     #[test]
     fn parse_equality_comparison_precedence() {
-        let s = "true != 4 > 2";
+        let s = "true != 4 > 2;";
 
         let scanner = Scanner::from(s);
 
@@ -983,7 +994,7 @@ mod test {
 
     #[test]
     fn parse_grouped() {
-        let s = "(1 + 2)";
+        let s = "(1 + 2);";
 
         let scanner = Scanner::from(s);
 

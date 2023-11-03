@@ -6,6 +6,12 @@ pub enum Statement {
     Expr(Expression),
 }
 
+impl From<Expression> for Statement {
+    fn from(value: Expression) -> Self {
+        Self::Expr(value)
+    }
+}
+
 /// A single expression.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Expression {

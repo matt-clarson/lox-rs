@@ -108,10 +108,19 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
                 }
                 Some(Value::Number(_)) => Err(VmError::Type(Type::Bool, Type::Number)),
                 Some(Value::Nil) => Err(VmError::Type(Type::Bool, Type::Nil)),
+                Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Bool, Type::String)),
                 None => Err(VmError::NoValue),
             },
             Op::Negate(_) => self.modify_number(|n| -n),
-            Op::Add(_) => self.binary_op_number(|a, b| a + b),
+            Op::Add(_) => match self.stack.peek() {
+                Some(Value::Number(_)) => self.binary_op_number(|a, b| a + b),
+                Some(Value::Obj(Obj::String(_))) => {
+                    self.binary_op_string(|a, b| (String::from(a) + b).into())
+                }
+                Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
+                Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
+                None => Err(VmError::NoValue),
+            },
             Op::Subtract(_) => self.binary_op_number(|a, b| a - b),
             Op::Multiply(_) => self.binary_op_number(|a, b| a * b),
             Op::Divide(_) => self.binary_op_number(|a, b| a / b),
@@ -145,6 +154,14 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
             .and_then(|a| self.modify_number(|b| f(b, a)))
     }
 
+    fn binary_op_string<F: FnOnce(&str, &str) -> Box<str>>(
+        &mut self,
+        f: F,
+    ) -> Result<Option<Value>, VmError> {
+        self.pop_string()
+            .and_then(|a| self.modify_string(|b| f(b, a.as_ref())))
+    }
+
     fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
         self.stack.push(if b { Value::True } else { Value::False });
         Ok(None)
@@ -165,6 +182,17 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
             Some(Value::Number(n)) => Ok(n),
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
+            Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Number, Type::String)),
+            None => Err(VmError::NoValue),
+        }
+    }
+
+    fn pop_string(&mut self) -> Result<Box<str>, VmError> {
+        match self.stack.pop() {
+            Some(Value::Obj(Obj::String(s))) => Ok(s),
+            Some(Value::True | Value::False) => Err(VmError::Type(Type::String, Type::Bool)),
+            Some(Value::Nil) => Err(VmError::Type(Type::String, Type::Nil)),
+            Some(Value::Number(_)) => Err(VmError::Type(Type::String, Type::Number)),
             None => Err(VmError::NoValue),
         }
     }
@@ -184,10 +212,26 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
             }
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
+            Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Number, Type::String)),
             None => Err(VmError::NoValue),
         }
     }
 
+    fn modify_string<F: FnOnce(&str) -> Box<str>>(
+        &mut self,
+        f: F,
+    ) -> Result<Option<Value>, VmError> {
+        match self.stack.peek_mut() {
+            Some(Value::Obj(Obj::String(s))) => {
+                let _ = mem::replace(s, f(s));
+                Ok(None)
+            }
+            Some(Value::True | Value::False) => Err(VmError::Type(Type::String, Type::Bool)),
+            Some(Value::Nil) => Err(VmError::Type(Type::String, Type::Nil)),
+            Some(Value::Number(_)) => Err(VmError::Type(Type::String, Type::Number)),
+            None => Err(VmError::NoValue),
+        }
+    }
     /// Enables debugging, printing to stdout before processing each op code.
     ///
     /// Note that the debugger is _disabled_ by default.
@@ -289,6 +333,10 @@ impl Stack {
         self.values.last_mut()
     }
 
+    fn peek(&self) -> Option<&Value> {
+        self.values.last()
+    }
+
     fn size(&self) -> usize {
         self.values.len()
     }
@@ -315,6 +363,20 @@ pub enum Value {
     False,
     /// A nil value.
     Nil,
+    /// An object - value is stored on the heap.
+    Obj(Obj),
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Self::Number(value)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Self::Obj(Obj::String(value.into()))
+    }
 }
 
 impl Debug for Value {
@@ -324,6 +386,7 @@ impl Debug for Value {
             Self::True => f.write_str("BOOL true"),
             Self::False => f.write_str("BOOL false"),
             Self::Nil => f.write_str("NIL"),
+            Self::Obj(o) => write!(f, "{o:?}"),
         }
     }
 }
@@ -335,6 +398,28 @@ impl Display for Value {
             Self::True => f.write_str("true"),
             Self::False => f.write_str("false"),
             Self::Nil => f.write_str("nil"),
+            Self::Obj(o) => write!(f, "{o}"),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+pub enum Obj {
+    String(Box<str>),
+}
+
+impl Debug for Obj {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(s) => write!(f, "STR  \"{s}\""),
+        }
+    }
+}
+
+impl Display for Obj {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String(s) => write!(f, "\"{s}\""),
         }
     }
 }
@@ -359,6 +444,7 @@ pub enum Type {
     Number,
     Bool,
     Nil,
+    String,
 }
 
 impl Display for Type {
@@ -367,6 +453,7 @@ impl Display for Type {
             Self::Number => f.write_str("number"),
             Self::Bool => f.write_str("boolean"),
             Self::Nil => f.write_str("nil"),
+            Self::String => f.write_str("string"),
         }
     }
 }
@@ -485,6 +572,24 @@ mod test {
         vm.load(instructions);
 
         assert_eq!(vm.next(), Some(Ok(Value::Number(10.0))));
+        assert_eq!(vm.next(), None);
+    }
+
+    #[test]
+    fn string_concatenation() {
+        let instructions = vec![
+            Op::Constant("hello".into()),
+            Op::Constant(" ".into()),
+            Op::Add(Span::default()),
+            Op::Constant("world".into()),
+            Op::Add(Span::default()),
+            Op::Return,
+        ];
+
+        let mut vm = VirtualMachine::new();
+        vm.load(instructions);
+
+        assert_eq!(vm.next(), Some(Ok("hello world".into())));
         assert_eq!(vm.next(), None);
     }
 

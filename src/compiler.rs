@@ -67,8 +67,8 @@ impl<'c> SourceCompiler<'c> {
     fn compile_expression(&self, ops: &mut Vec<Op>, expr: &Expression) -> Result<(), CompileError> {
         match expr {
             Expression::Primary(Primary::Number(t)) => {
-                let n = self.span(t).parse()?;
-                let op = Op::Constant(Value::Number(n));
+                let n = self.span(t).parse::<f64>()?;
+                let op = Op::Constant(n.into());
                 ops.push(op);
             }
             Expression::Primary(Primary::True(_)) => {
@@ -83,12 +83,22 @@ impl<'c> SourceCompiler<'c> {
                 let op = Op::Constant(Value::Nil);
                 ops.push(op);
             }
+            Expression::Primary(Primary::String(t)) => {
+                let s = self.span(&t.inner());
+                let op = Op::Constant(s.into());
+                ops.push(op);
+            }
             Expression::Primary(Primary::Group(group)) => {
                 self.compile_expression(ops, &group.expr)?;
             }
             Expression::Unary(Unary::Negate(negate)) => {
                 self.compile_expression(ops, &negate.expr)?;
                 let op = Op::Negate(negate.operator);
+                ops.push(op);
+            }
+            Expression::Unary(Unary::Not(not)) => {
+                self.compile_expression(ops, &not.expr)?;
+                let op = Op::Not(not.operator);
                 ops.push(op);
             }
             Expression::Factor(Factor::Multiply(mult)) => {
@@ -195,6 +205,8 @@ impl From<ParseFloatError> for CompileError {
 
 #[cfg(test)]
 mod test {
+    use crate::vm::Obj;
+
     use super::*;
 
     #[test]
@@ -242,6 +254,43 @@ mod test {
         assert_eq!(
             compiler.compile(s),
             Ok(vec![Op::Constant(Value::Nil), Op::Return].into())
+        );
+    }
+
+    #[test]
+    fn compile_string() {
+        let s = "\"hello\";";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::String("hello".into()))),
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_not() {
+        let s = "!false;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::False),
+                Op::Not(Span {
+                    start: 0,
+                    length: 1,
+                    line: 1
+                }),
+                Op::Return
+            ]
+            .into())
         );
     }
 
@@ -301,6 +350,34 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Subtract(Span {
                     start: 4,
+                    length: 1,
+                    line: 1
+                }),
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_string_concatenation() {
+        let s = "\"hello\" + \" \" + \"world\";";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::String("hello".into()))),
+                Op::Constant(Value::Obj(Obj::String(" ".into()))),
+                Op::Add(Span {
+                    start: 8,
+                    length: 1,
+                    line: 1
+                }),
+                Op::Constant(Value::Obj(Obj::String("world".into()))),
+                Op::Add(Span {
+                    start: 14,
                     length: 1,
                     line: 1
                 }),

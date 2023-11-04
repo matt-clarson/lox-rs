@@ -368,6 +368,18 @@ pub struct Span {
     pub line: usize,
 }
 
+impl Span {
+    /// Create a span offset by one character 'inside' the current span. E.g. for selecting the
+    /// contents of a string span ("abc" -> abc).
+    pub fn inner(&self) -> Self {
+        Self {
+            start: self.start + 1,
+            length: self.length - 2,
+            line: self.line
+        }
+    }
+}
+
 impl Display for Span {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.line, self.start + 1)

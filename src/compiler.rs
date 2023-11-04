@@ -11,22 +11,36 @@ use crate::{
 /// [VM](crate::vm::VirtualMachine).
 ///
 /// See the [crate docs](crate) for documentation on using the compiler with the VM.
-pub struct Compiler<'c> {
+pub struct Compiler {}
+
+struct SourceCompiler<'c> {
     source: &'c str,
-    parser: Parser<'c>,
+    parser: Parser<'c>
 }
 
-impl<'c> From<&'c str> for Compiler<'c> {
-    fn from(source: &'c str) -> Self {
-        let scanner = Scanner::from(source);
-        let parser = Parser::from(scanner);
-        Self { parser, source }
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl<'c> Compiler<'c> {
-    /// Produces bytecode instructions.
-    pub fn compile(&mut self) -> Result<Vec<Op>, CompileError> {
+impl Compiler {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Produces bytecode instructions for the given input string.
+    pub fn compile(&self, source: &str) -> Result<Vec<Op>, CompileError> {
+        let scanner = Scanner::from(source);
+        let parser = Parser::from(scanner);
+        let mut c = SourceCompiler{source, parser};
+
+        c.compile()
+    }
+}
+
+impl<'c> SourceCompiler<'c> {
+    fn compile(&mut self) -> Result<Vec<Op>, CompileError> {
         let mut ops = vec![];
 
         while let Some(result) = self.parser.next() {
@@ -175,10 +189,10 @@ mod test {
     fn compile_number() {
         let s = "1.4;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![Op::Constant(Value::Number(1.4)), Op::Return].into())
         );
     }
@@ -186,10 +200,10 @@ mod test {
     fn compile_negate() {
         let s = "-1.4;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Negate(Span {
@@ -207,10 +221,10 @@ mod test {
     fn compile_addition() {
         let s = "1.4 + 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -229,10 +243,10 @@ mod test {
     fn compile_subtraction() {
         let s = "1.4 - 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -251,10 +265,10 @@ mod test {
     fn compile_multiplication() {
         let s = "1.4 * 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -273,10 +287,10 @@ mod test {
     fn compile_division() {
         let s = "1.4 / 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -295,10 +309,10 @@ mod test {
     fn compile_less() {
         let s = "1.4 < 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -317,10 +331,10 @@ mod test {
     fn compile_less_or_equal() {
         let s = "1.4 <= 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -339,10 +353,10 @@ mod test {
     fn compile_greater() {
         let s = "1.4 > 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -361,10 +375,10 @@ mod test {
     fn compile_greater_or_equal() {
         let s = "1.4 >= 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -383,10 +397,10 @@ mod test {
     fn compile_equals() {
         let s = "1.4 == 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -405,10 +419,10 @@ mod test {
     fn compile_not_equals() {
         let s = "1.4 != 6.5;";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
@@ -427,10 +441,10 @@ mod test {
     fn compile_group() {
         let s = "2 * (1 + 5);";
 
-        let mut compiler = Compiler::from(s);
+        let compiler = Compiler::default();
 
         assert_eq!(
-            compiler.compile(),
+            compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(2.0)),
                 Op::Constant(Value::Number(1.0)),

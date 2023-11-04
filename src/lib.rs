@@ -7,14 +7,14 @@
 //! ```
 //! use lox::{compiler::Compiler, vm::{Value, VirtualMachine}};
 //!
-//! let mut vm = VirtualMachine::new();
+//! let compiler = Compiler::default();
+//! let mut vm = VirtualMachine::default();
 //!
 //! let source = "2 * (5 - 2);";
-//! let mut compiler = Compiler::from(source);
-//! let ops = compiler.compile().unwrap();
+//! let ops = compiler.compile(source).unwrap();
 //!
 //! // need to make sure the compiler output is loaded into the vm before calling `next`.
-//! vm.load(ops.iter());
+//! vm.load(ops);
 //!
 //! assert_eq!(vm.next(), Some(Ok(Value::Number(6.0))));
 //! ```

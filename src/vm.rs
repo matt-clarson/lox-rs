@@ -107,6 +107,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
                     Ok(None)
                 }
                 Some(Value::Number(_)) => Err(VmError::Type(Type::Bool, Type::Number)),
+                Some(Value::Nil) => Err(VmError::Type(Type::Bool, Type::Nil)),
                 None => Err(VmError::NoValue),
             },
             Op::Negate(_) => self.modify_number(|n| -n),
@@ -163,6 +164,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         match self.stack.pop() {
             Some(Value::Number(n)) => Ok(n),
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
+            Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
             None => Err(VmError::NoValue),
         }
     }
@@ -181,6 +183,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
                 Ok(None)
             }
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
+            Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
             None => Err(VmError::NoValue),
         }
     }
@@ -310,6 +313,8 @@ pub enum Value {
     True,
     /// A boolean false.
     False,
+    /// A nil value.
+    Nil,
 }
 
 impl Debug for Value {
@@ -318,6 +323,7 @@ impl Debug for Value {
             Self::Number(n) => write!(f, "NUM  {n}"),
             Self::True => f.write_str("BOOL true"),
             Self::False => f.write_str("BOOL false"),
+            Self::Nil => f.write_str("NIL"),
         }
     }
 }
@@ -328,6 +334,7 @@ impl Display for Value {
             Self::Number(n) => write!(f, "{n}"),
             Self::True => f.write_str("true"),
             Self::False => f.write_str("false"),
+            Self::Nil => f.write_str("nil"),
         }
     }
 }
@@ -351,6 +358,7 @@ pub enum VmError {
 pub enum Type {
     Number,
     Bool,
+    Nil,
 }
 
 impl Display for Type {
@@ -358,6 +366,7 @@ impl Display for Type {
         match self {
             Self::Number => f.write_str("number"),
             Self::Bool => f.write_str("boolean"),
+            Self::Nil => f.write_str("nil"),
         }
     }
 }

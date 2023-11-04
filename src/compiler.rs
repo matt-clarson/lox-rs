@@ -71,6 +71,18 @@ impl<'c> SourceCompiler<'c> {
                 let op = Op::Constant(Value::Number(n));
                 ops.push(op);
             }
+            Expression::Primary(Primary::True(_)) => {
+                let op = Op::Constant(Value::True);
+                ops.push(op);
+            }
+            Expression::Primary(Primary::False(_)) => {
+                let op = Op::Constant(Value::False);
+                ops.push(op);
+            }
+            Expression::Primary(Primary::Nil(_)) => {
+                let op = Op::Constant(Value::Nil);
+                ops.push(op);
+            }
             Expression::Primary(Primary::Group(group)) => {
                 self.compile_expression(ops, &group.expr)?;
             }
@@ -196,6 +208,43 @@ mod test {
             Ok(vec![Op::Constant(Value::Number(1.4)), Op::Return].into())
         );
     }
+
+    #[test]
+    fn compile_true() {
+        let s = "true;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![Op::Constant(Value::True), Op::Return].into())
+        );
+    }
+
+    #[test]
+    fn compile_false() {
+        let s = "false;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![Op::Constant(Value::False), Op::Return].into())
+        );
+    }
+
+    #[test]
+    fn compile_nil() {
+        let s = "nil;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![Op::Constant(Value::Nil), Op::Return].into())
+        );
+    }
+
     #[test]
     fn compile_negate() {
         let s = "-1.4;";

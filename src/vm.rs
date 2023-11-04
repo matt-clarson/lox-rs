@@ -305,7 +305,7 @@ impl Display for Stack {
 
 /// Represents a storable value, which can be moved on and off the [VM](VirtualMachine)'s internal
 /// stack.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(PartialEq)]
 pub enum Value {
     /// A numerical, floating-point value.
     Number(f64),

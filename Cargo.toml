@@ -2,6 +2,11 @@
 name = "lox"
 version = "0.1.0"
 edition = "2021"
+authors = ["Matt Clarson <clarson469@gmail.com>"]
 
 [dev-dependencies]
 assert_matches = "1.5.0"
+
+[dependencies]
+clap = { version = "4.4.7", features = ["derive"] }
+rustyline = "12.0.0"

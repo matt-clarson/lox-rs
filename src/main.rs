@@ -1,19 +1,30 @@
-use lox::{compiler::Compiler, vm::VirtualMachine};
+use std::path::Path;
+
+use clap::Parser;
 
 fn main() {
-    let compiler = Compiler::default();
-    let mut vm = VirtualMachine::new();
-    vm.enable_debug();
+    let cli = Cli::parse();
 
-    let source = "4 * (8 + 2);";
+    let config = lox::Config { debug: cli.debug };
 
-    let instructions = compiler.compile(source).unwrap();
-    vm.load(instructions);
+    let result = cli
+        .file
+        .map(|file| lox::interpret(file, &config))
+        .unwrap_or_else(|| lox::Repl::run(&config));
 
-    for result in vm {
-        match result {
-            Ok(value) => println!("got value: {value}"),
-            Err(e) => eprintln!("error: {e}"),
-        }
+    if let Err(err) = result {
+        eprintln!("Error: {err}");
     }
+}
+
+#[derive(Parser)]
+#[command(author, version, long_about = None)]
+#[command(about = "Lox interpreter")]
+struct Cli {
+    /// Source file to read and execute - do not provide a file to instead launch the REPL.
+    file: Option<Box<Path>>,
+
+    /// Run in debug mode.
+    #[arg(short, long)]
+    debug: bool,
 }

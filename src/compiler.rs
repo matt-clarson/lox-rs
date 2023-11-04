@@ -15,7 +15,7 @@ pub struct Compiler {}
 
 struct SourceCompiler<'c> {
     source: &'c str,
-    parser: Parser<'c>
+    parser: Parser<'c>,
 }
 
 impl Default for Compiler {
@@ -33,7 +33,7 @@ impl Compiler {
     pub fn compile(&self, source: &str) -> Result<Vec<Op>, CompileError> {
         let scanner = Scanner::from(source);
         let parser = Parser::from(scanner);
-        let mut c = SourceCompiler{source, parser};
+        let mut c = SourceCompiler { source, parser };
 
         c.compile()
     }

@@ -1,4 +1,8 @@
-use std::{error::Error, fmt::Display, mem};
+use std::{
+    error::Error,
+    fmt::{Debug, Display},
+    mem,
+};
 
 use crate::scanner::Span;
 
@@ -38,7 +42,7 @@ pub struct VirtualMachine<I: Iterator<Item = Op>> {
     debug: bool,
 }
 
-impl <I: Iterator<Item = Op>> Default for VirtualMachine<I> {
+impl<I: Iterator<Item = Op>> Default for VirtualMachine<I> {
     fn default() -> Self {
         Self::new()
     }
@@ -195,8 +199,8 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
 
     fn print_debug(&self, op: &Op) {
         println!("-- vm debug --");
-        println!("NEXT OP: {op}");
-        println!("-- stack ({}) --", self.stack.size());
+        println!("  NEXT OP: {op}");
+        println!("  -- stack ({}) --", self.stack.size());
         println!("{}", self.stack);
     }
 }
@@ -244,7 +248,7 @@ impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Op::Return => f.write_str("OP_RETURN"),
-            Self::Constant(v) => write!(f, "OP_CONSTANT {v}"),
+            Self::Constant(v) => write!(f, "OP_CONSTANT {v:?}"),
             Self::Not(t) => write!(f, "OP_NOT ({t})"),
             Self::Negate(t) => write!(f, "OP_NEG ({t})"),
             Self::Add(t) => write!(f, "OP_ADD ({t})"),
@@ -290,7 +294,7 @@ impl Stack {
 impl Display for Stack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, value) in self.values.iter().enumerate().rev() {
-            writeln!(f, "[{i:04}\t{value}]")?;
+            writeln!(f, "    [{i:04}\t{value:?}]")?;
         }
         Ok(())
     }
@@ -298,7 +302,7 @@ impl Display for Stack {
 
 /// Represents a storable value, which can be moved on and off the [VM](VirtualMachine)'s internal
 /// stack.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum Value {
     /// A numerical, floating-point value.
     Number(f64),
@@ -308,12 +312,22 @@ pub enum Value {
     False,
 }
 
-impl Display for Value {
+impl Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Number(n) => write!(f, "NUM  {n}"),
             Self::True => f.write_str("BOOL true"),
             Self::False => f.write_str("BOOL false"),
+        }
+    }
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(n) => write!(f, "{n}"),
+            Self::True => f.write_str("true"),
+            Self::False => f.write_str("false"),
         }
     }
 }

@@ -377,7 +377,11 @@ impl Display for Span {
 impl Default for Span {
     /// Used for testing purposes.
     fn default() -> Self {
-        Self {start: 0, length: 0, line: 0}
+        Self {
+            start: 0,
+            length: 0,
+            line: 0,
+        }
     }
 }
 
@@ -611,18 +615,9 @@ mod test {
 
         let mut scanner = Scanner::from(s);
 
-        assert_matches!(
-            scanner.next(),
-            Some(Ok(Token::Bang(Span { line: 1, .. })))
-        );
-        assert_matches!(
-            scanner.next(),
-            Some(Ok(Token::Bang(Span { line: 2, .. })))
-        );
-        assert_matches!(
-            scanner.next(),
-            Some(Ok(Token::Bang(Span { line: 3, .. })))
-        );
+        assert_matches!(scanner.next(), Some(Ok(Token::Bang(Span { line: 1, .. }))));
+        assert_matches!(scanner.next(), Some(Ok(Token::Bang(Span { line: 2, .. }))));
+        assert_matches!(scanner.next(), Some(Ok(Token::Bang(Span { line: 3, .. }))));
         assert_matches!(scanner.next(), None);
     }
 

@@ -4,6 +4,8 @@ use crate::scanner::Span;
 
 /// Stack-based VM for executing compiled Lox bytecode.
 ///
+///See the [crate docs](crate) for docs on using the VM with a compiler.
+///
 /// If the VM encounters an error it will return it and will then halt execution, even if the
 /// provided set of instructions would otherwise continue past the error point.
 ///
@@ -56,13 +58,12 @@ impl<'v, I: Iterator<Item = &'v Op>> Iterator for VirtualMachine<'v, I> {
             }
 
             let r = self.process_op(op);
-            match r {
-                Ok(Some(_)) => return r.transpose(),
-                Err(_) => {
-                    self.errored = true;
-                    return r.transpose();
-                }
-                _ => {}
+
+            if let Ok(Some(_)) = r {
+                return r.transpose();
+            } else if let Err(_) = r {
+                self.errored = true;
+                return r.transpose();
             }
         }
 

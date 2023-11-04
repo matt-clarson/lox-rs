@@ -9,6 +9,8 @@ use crate::{
 
 /// Compiles source code to a list of bytecode instructions to be consumed by the
 /// [VM](crate::vm::VirtualMachine).
+///
+/// See the [crate docs](crate) for documentation on using the compiler with the VM.
 pub struct Compiler<'c> {
     source: &'c str,
     parser: Parser<'c>,

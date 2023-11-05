@@ -1,7 +1,7 @@
 use std::{error::Error, fmt::Display, num::ParseFloatError};
 
 use crate::{
-    ast::{Comparison, Equality, Expression, Factor, Primary, Statement, Term, Unary},
+    ast::{Comparison, Declaration, Equality, Expression, Factor, Primary, Statement, Term, Unary},
     parser::{ParseError, Parser},
     scanner::{Scanner, Span},
     vm::{Op, Value},
@@ -44,8 +44,8 @@ impl<'c> SourceCompiler<'c> {
         let mut ops = vec![];
 
         while let Some(result) = self.parser.next() {
-            let statement = result?;
-            self.compile_statement(&mut ops, &statement)?;
+            let declaration = result?;
+            self.compile_declaration(&mut ops, &declaration)?;
         }
 
         // TODO remove this when we get functions
@@ -54,13 +54,32 @@ impl<'c> SourceCompiler<'c> {
         Ok(ops)
     }
 
+    fn compile_declaration(
+        &self,
+        ops: &mut Vec<Op>,
+        declaration: &Declaration,
+    ) -> Result<(), CompileError> {
+        match declaration {
+            Declaration::Stmt(stmt) => self.compile_statement(ops, stmt),
+        }
+    }
+
     fn compile_statement(
         &self,
         ops: &mut Vec<Op>,
         statement: &Statement,
     ) -> Result<(), CompileError> {
         match statement {
-            Statement::Expr(expr) => self.compile_expression(ops, expr),
+            Statement::Print(print) => {
+                self.compile_expression(ops, &print.expr)?;
+                ops.push(Op::Print(print.keyword));
+                Ok(())
+            }
+            Statement::Expr(expr) => {
+                self.compile_expression(ops, expr)?;
+                ops.push(Op::Pop);
+                Ok(())
+            }
         }
     }
 
@@ -217,7 +236,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::Number(1.4)), Op::Return].into())
+            Ok(vec![Op::Constant(Value::Number(1.4)), Op::Pop, Op::Return].into())
         );
     }
 
@@ -229,7 +248,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::True), Op::Return].into())
+            Ok(vec![Op::Constant(Value::True), Op::Pop, Op::Return].into())
         );
     }
 
@@ -241,7 +260,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::False), Op::Return].into())
+            Ok(vec![Op::Constant(Value::False), Op::Pop, Op::Return].into())
         );
     }
 
@@ -253,7 +272,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::Nil), Op::Return].into())
+            Ok(vec![Op::Constant(Value::Nil), Op::Pop, Op::Return].into())
         );
     }
 
@@ -267,6 +286,7 @@ mod test {
             compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Obj(Obj::String("hello".into()))),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -288,6 +308,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -309,6 +330,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -331,6 +353,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -353,6 +376,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -381,6 +405,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -403,6 +428,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -425,6 +451,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -447,6 +474,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -469,6 +497,7 @@ mod test {
                     length: 2,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -491,6 +520,7 @@ mod test {
                     length: 1,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -513,6 +543,7 @@ mod test {
                     length: 2,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -535,6 +566,7 @@ mod test {
                     length: 2,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -557,6 +589,7 @@ mod test {
                     length: 2,
                     line: 1
                 }),
+                Op::Pop,
                 Op::Return
             ]
             .into())
@@ -583,6 +616,28 @@ mod test {
                 Op::Multiply(Span {
                     start: 2,
                     length: 1,
+                    line: 1
+                }),
+                Op::Pop,
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_print() {
+        let s = "print 123;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Number(123.0)),
+                Op::Print(Span {
+                    start: 0,
+                    length: 5,
                     line: 1
                 }),
                 Op::Return

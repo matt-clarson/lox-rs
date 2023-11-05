@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Uses a source of scanned [tokens](crate::scanner::Token) to output an AST, as a stream of
-/// [statements](crate::ast::Statement).
+/// [declarations](crate::ast::Declaration).
 pub struct Parser<'s> {
     scanner: Peekable<Scanner<'s>>,
 }
@@ -20,13 +20,13 @@ impl<'s> From<Scanner<'s>> for Parser<'s> {
 }
 
 impl<'s> Iterator for Parser<'s> {
-    type Item = Result<Statement, ParseError>;
+    type Item = Result<Declaration, ParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished() {
             None
         } else {
-            Some(self.statement())
+            Some(self.declaration())
         }
     }
 }
@@ -34,9 +34,31 @@ impl<'s> Iterator for Parser<'s> {
 type ParseResult<T> = Result<T, ParseError>;
 
 impl<'s> Parser<'s> {
-    fn statement(&mut self) -> ParseResult<Statement> {
-        self.expression()
-            .and_then(|expr| self.take_semicolon().map(|_| expr.into()))
+    fn declaration(&mut self) -> ParseResult<Declaration> {
+        self.statement()
+    }
+
+    fn statement(&mut self) -> ParseResult<Declaration> {
+        match self.scanner.peek() {
+            Some(Ok(Token::Print(_))) => self.print(),
+            Some(Ok(_)) => self.expression_statement(),
+            Some(Err(e)) => Err(ParseError::Scan(*e)),
+            None => Err(ParseError::UnexpectedEof),
+        }
+        .map(Declaration::Stmt)
+    }
+
+    fn print(&mut self) -> ParseResult<Statement> {
+        let stmt = Statement::Print(Print {
+            keyword: self.advance()?.meta(),
+            expr: self.expression()?,
+        });
+        self.take_semicolon().and(Ok(stmt))
+    }
+
+    fn expression_statement(&mut self) -> ParseResult<Statement> {
+        let stmt = self.expression().map(Statement::Expr);
+        self.take_semicolon().and(stmt)
     }
 
     fn expression(&mut self) -> ParseResult<Expression> {
@@ -280,12 +302,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::Number(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::Number(Span {
                     start: 0,
                     length: 3,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -300,12 +322,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::String(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::String(Span {
                     start: 0,
                     length: 7,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -320,12 +342,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::Ident(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::Ident(Span {
                     start: 0,
                     length: 1,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -340,12 +362,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::Nil(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::Nil(Span {
                     start: 0,
                     length: 3,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -360,12 +382,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::True(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::True(Span {
                     start: 0,
                     length: 4,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -380,12 +402,12 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::False(
-                Span {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::False(Span {
                     start: 0,
                     length: 5,
                     line: 1
-                }
+                })
             )))))
         );
     }
@@ -400,8 +422,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Unary(Unary::Negate(
-                UnaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Unary(
+                Unary::Negate(UnaryExpression {
                     operator: Span {
                         start: 0,
                         length: 1,
@@ -412,7 +434,7 @@ mod test {
                         length: 1,
                         line: 1
                     })))
-                }
+                })
             )))))
         );
     }
@@ -427,8 +449,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Unary(Unary::Not(
-                UnaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Unary(
+                Unary::Not(UnaryExpression {
                     operator: Span {
                         start: 0,
                         length: 1,
@@ -439,7 +461,7 @@ mod test {
                         length: 1,
                         line: 1
                     })))
-                }
+                })
             )))))
         );
     }
@@ -454,8 +476,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Factor(Factor::Divide(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
+                Factor::Divide(BinaryExpression {
                     operator: Span {
                         start: 6,
                         length: 1,
@@ -483,7 +505,7 @@ mod test {
                         length: 1,
                         line: 1
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -498,8 +520,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Factor(Factor::Multiply(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
+                Factor::Multiply(BinaryExpression {
                     operator: Span {
                         start: 6,
                         length: 1,
@@ -527,7 +549,7 @@ mod test {
                         length: 1,
                         line: 1
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -542,8 +564,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Factor(Factor::Multiply(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
+                Factor::Multiply(BinaryExpression {
                     operator: Span {
                         start: 3,
                         length: 1,
@@ -573,7 +595,7 @@ mod test {
                             line: 1,
                         }))),
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -588,8 +610,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Term(Term::Minus(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
+                Term::Minus(BinaryExpression {
                     operator: Span {
                         start: 6,
                         length: 1,
@@ -617,7 +639,7 @@ mod test {
                         length: 1,
                         line: 1
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -632,8 +654,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Term(Term::Plus(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
+                Term::Plus(BinaryExpression {
                     operator: Span {
                         start: 6,
                         length: 1,
@@ -661,7 +683,7 @@ mod test {
                         length: 1,
                         line: 1
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -676,8 +698,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Term(Term::Plus(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
+                Term::Plus(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 1,
@@ -705,7 +727,7 @@ mod test {
                             line: 1,
                         }))),
                     }))),
-                }
+                })
             )))))
         );
     }
@@ -720,8 +742,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Comparison(
-                Comparison::LessThan(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Comparison(Comparison::LessThan(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 1,
@@ -737,7 +759,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -752,8 +774,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Comparison(
-                Comparison::LessThanOrEquals(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Comparison(Comparison::LessThanOrEquals(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 2,
@@ -769,7 +791,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -784,8 +806,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Comparison(
-                Comparison::GreaterThan(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Comparison(Comparison::GreaterThan(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 1,
@@ -801,7 +823,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -816,8 +838,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Comparison(
-                Comparison::GreaterThanOrEquals(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Comparison(Comparison::GreaterThanOrEquals(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 2,
@@ -833,7 +855,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -848,8 +870,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Comparison(
-                Comparison::GreaterThan(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Comparison(Comparison::GreaterThan(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 1,
@@ -877,7 +899,7 @@ mod test {
                             line: 1,
                         }))),
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -892,8 +914,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Equality(Equality::Equals(
-                BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Equality(Equality::Equals(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 2,
@@ -909,8 +931,8 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }
-            )))))
+                }))
+            ))))
         );
     }
 
@@ -924,8 +946,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Equality(
-                Equality::NotEquals(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Equality(Equality::NotEquals(BinaryExpression {
                     operator: Span {
                         start: 2,
                         length: 2,
@@ -941,7 +963,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                })
+                }))
             ))))
         );
     }
@@ -956,8 +978,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Equality(
-                Equality::NotEquals(BinaryExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Equality(Equality::NotEquals(BinaryExpression {
                     operator: Span {
                         start: 5,
                         length: 2,
@@ -987,7 +1009,7 @@ mod test {
                             }))),
                         }
                     ))),
-                })
+                }))
             ))))
         );
     }
@@ -1002,8 +1024,8 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Statement::Expr(Expression::Primary(Primary::Group(
-                GroupedExpression {
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
+                Primary::Group(GroupedExpression {
                     start: Span {
                         start: 0,
                         length: 1,
@@ -1031,8 +1053,33 @@ mod test {
                             line: 1,
                         }))),
                     }))),
-                }
+                })
             )))))
+        );
+    }
+
+    #[test]
+    fn parse_print() {
+        let s = "print x;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Print(Print {
+                keyword: Span {
+                    start: 0,
+                    length: 5,
+                    line: 1
+                },
+                expr: Expression::Primary(Primary::Ident(Span {
+                    start: 6,
+                    length: 1,
+                    line: 1
+                }))
+            }))))
         );
     }
 }

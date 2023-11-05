@@ -20,15 +20,17 @@
 //! use lox::{compiler::Compiler, vm::{Value, VirtualMachine}};
 //!
 //! let compiler = Compiler::default();
-//! let mut vm = VirtualMachine::default();
+//! let mut buf: Vec<u8> = vec![];
+//! let mut vm = VirtualMachine::new(&mut buf);
 //!
-//! let source = "2 * (5 - 2);";
+//! let source = "print 2 * (5 - 2);";
 //! let ops = compiler.compile(source).unwrap();
 //!
-//! // need to make sure the compiler output is loaded into the vm before calling `next`.
+//! // need to make sure the compiler output is loaded into the vm before calling `exec`
 //! vm.load(ops);
 //!
-//! assert_eq!(vm.next(), Some(Ok(Value::Number(6.0))));
+//! vm.exec().unwrap();
+//! assert_eq!(String::from_utf8(buf), Ok(String::from("6\n")));
 //! ```
 
 #[cfg(test)]
@@ -68,12 +70,5 @@ pub fn interpret<P: AsRef<Path>>(file: P, config: &Config) -> Result<(), Box<dyn
     let ops = compiler.compile(&source)?;
     vm.load(ops);
 
-    for result in vm {
-        match result {
-            Ok(value) => println!("{value}"),
-            Err(err) => return Err(err.into()),
-        };
-    }
-
-    Ok(())
+    vm.exec().map_err(Into::into)
 }

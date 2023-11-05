@@ -1,7 +1,10 @@
 use std::{
+    collections::HashSet,
     error::Error,
     fmt::{Debug, Display},
-    mem, collections::HashSet, rc::Rc,
+    io::{self, Write},
+    mem,
+    rc::Rc,
 };
 
 use crate::scanner::Span;
@@ -26,38 +29,50 @@ use crate::scanner::Span;
 ///     Op::Constant(Value::Number(1.3)),
 ///     Op::Constant(Value::Number(8.7)),
 ///     Op::Add(Span::default()),
+///     Op::Print(Span::default()),
 ///     Op::Return,
 /// ];
 ///
-/// let mut vm = VirtualMachine::new();
+/// let mut buf: Vec<u8> = vec![];
+/// let mut vm = VirtualMachine::new(&mut buf);
 /// vm.load(instructions);
 ///
-/// assert_eq!(vm.next(), Some(Ok(Value::Number(10.0))));
-/// assert_eq!(vm.next(), None);
+/// assert_eq!(vm.exec(), Ok(()));
+/// assert_eq!(String::from_utf8(buf), Ok(String::from("10\n")));
 /// ```
-pub struct VirtualMachine<I: Iterator<Item = Op>> {
+pub struct VirtualMachine<I: Iterator<Item = Op>, W: Write> {
+    stdout: W,
     ops: Option<I>,
     stack: Stack,
     strings: HashSet<Rc<str>>,
-    errored: bool,
     debug: bool,
 }
 
-impl<I: Iterator<Item = Op>> Default for VirtualMachine<I> {
+impl<I: Iterator<Item = Op>> Default for VirtualMachine<I, io::Stdout> {
     fn default() -> Self {
-        Self::new()
+        Self::new(io::stdout())
     }
 }
 
-impl<I: Iterator<Item = Op>> Iterator for VirtualMachine<I> {
-    type Item = Result<Value, VmError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.errored {
-            return None;
+impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
+    pub fn new(stdout: W) -> Self {
+        Self {
+            stdout,
+            ops: None,
+            stack: Stack::new(),
+            strings: HashSet::new(),
+            debug: false,
         }
+    }
 
-        while let Some(op) = self.ops.as_mut()?.next() {
+    /// Loads a new set of operations into the VM.
+    pub fn load<T: IntoIterator<IntoIter = I>>(&mut self, ops: T) {
+        self.ops = Some(ops.into_iter());
+    }
+
+    /// Execute the currently loaded operations.
+    pub fn exec(&mut self) -> Result<(), VmError> {
+        while let Some(op) = self.ops.as_mut().and_then(Iterator::next) {
             if self.debug {
                 self.print_debug(&op);
             }
@@ -65,35 +80,16 @@ impl<I: Iterator<Item = Op>> Iterator for VirtualMachine<I> {
             let r = self.process_op(op);
 
             if let Ok(Some(_)) = r {
-                return r.transpose();
-            } else if r.is_err() {
-                self.errored = true;
-                return r.transpose();
+                return Ok(());
+            } else if let Err(err) = r {
+                return Err(err);
             }
         }
 
-        None
-    }
-}
-
-impl<I: Iterator<Item = Op>> VirtualMachine<I> {
-    pub fn new() -> Self {
-        Self {
-            ops: None,
-            stack: Stack::new(),
-            strings: HashSet::new(),
-            errored: false,
-            debug: false,
-        }
+        Ok(())
     }
 
-    /// Loads a new set of operations into the VM. These can then be executed using the VM
-    /// [Iterator] implementation.
-    pub fn load<T: IntoIterator<IntoIter = I>>(&mut self, ops: T) {
-        self.ops = Some(ops.into_iter());
-    }
-
-    fn process_op(&mut self, op: Op) -> Result<Option<Value>, VmError> {
+    fn process_op(&mut self, op: Op) -> Result<Option<()>, VmError> {
         match op {
             Op::Constant(value) => self.push_value(value),
             Op::Not(_) => match self.stack.peek_mut() {
@@ -141,7 +137,17 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
             Op::NotEquals(_) => self
                 .pop_two_values()
                 .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
-            Op::Return => self.stack.pop().ok_or(VmError::NoValue).map(Some),
+            Op::Return => Ok(Some(())),
+            Op::Pop => self.stack.pop().ok_or(VmError::NoValue).and(Ok(None)),
+            Op::Print(_) => {
+                let v = self.stack.pop().ok_or(VmError::NoValue)?;
+                if self.debug {
+                    self.stdout.write(b"out= ")?;
+                }
+                self.stdout.write_all(v.to_string().as_bytes())?;
+                self.stdout.write(b"\n")?;
+                Ok(None)
+            }
         }
     }
 
@@ -155,9 +161,9 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         match a {
             Value::Obj(Obj::String(s_a)) => match b {
                 Value::Obj(Obj::String(s_b)) => Rc::ptr_eq(s_a, s_b),
-                _ => false
+                _ => false,
             },
-            _ => a == b
+            _ => a == b,
         }
     }
 
@@ -170,7 +176,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         }
     }
 
-    fn push_value(&mut self, value: Value) -> Result<Option<Value>, VmError> {
+    fn push_value(&mut self, value: Value) -> Result<Option<()>, VmError> {
         match value {
             Value::Obj(Obj::String(s)) => self.push_string(s),
             v => {
@@ -180,22 +186,21 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         }
     }
 
-    fn push_string(&mut self, s: Rc<str>) -> Result<Option<Value>, VmError> {
+    fn push_string(&mut self, s: Rc<str>) -> Result<Option<()>, VmError> {
         let interned = self.intern_string(s);
         self.stack.push(interned.into());
         Ok(None)
     }
 
-    fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
+    fn push_bool(&mut self, b: bool) -> Result<Option<()>, VmError> {
         self.stack.push(if b { Value::True } else { Value::False });
         Ok(None)
     }
 
-
     fn binary_op_number<F: FnOnce(f64, f64) -> f64>(
         &mut self,
         f: F,
-    ) -> Result<Option<Value>, VmError> {
+    ) -> Result<Option<()>, VmError> {
         self.pop_number()
             .and_then(|a| self.modify_number(|b| f(b, a)))
     }
@@ -203,8 +208,9 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
     fn binary_op_string<F: FnOnce(&str, &str) -> Rc<str>>(
         &mut self,
         f: F,
-    ) -> Result<Option<Value>, VmError> {
-        self.pop_two_strings().and_then(|(a, b)| self.push_string(f(&a, &b)))
+    ) -> Result<Option<()>, VmError> {
+        self.pop_two_strings()
+            .and_then(|(a, b)| self.push_string(f(&a, &b)))
     }
 
     fn pop_two_numbers(&mut self) -> Result<(f64, f64), VmError> {
@@ -213,7 +219,8 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
     }
 
     fn pop_two_strings(&mut self) -> Result<(Rc<str>, Rc<str>), VmError> {
-        self.pop_string().and_then(|b| self.pop_string().map(|a| (a, b)))
+        self.pop_string()
+            .and_then(|b| self.pop_string().map(|a| (a, b)))
     }
 
     fn pop_two_values(&mut self) -> Result<(Value, Value), VmError> {
@@ -248,7 +255,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         }
     }
 
-    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<Value>, VmError> {
+    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<()>, VmError> {
         match self.stack.peek_mut() {
             Some(Value::Number(n)) => {
                 let _ = mem::replace(n, f(*n));
@@ -286,6 +293,10 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
 pub enum Op {
     /// Pops the top value from the stack to be returned to the caller.
     Return,
+    /// Pops the top value from the stack and discards it.
+    Pop,
+    /// Pops the top value from the stack and sends it to stdout.
+    Print(Span),
     /// Pushes the wrapped [`Value`] onto the stack.
     Constant(Value),
     /// Flips the top value on the stack, if it is a boolean.
@@ -323,7 +334,9 @@ pub enum Op {
 impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Op::Return => f.write_str("OP_RETURN"),
+            Self::Return => f.write_str("OP_RETURN"),
+            Self::Pop => f.write_str("OP_POP"),
+            Self::Print(t) => write!(f, "OP_PRINT ({t})"),
             Self::Constant(v) => write!(f, "OP_CONSTANT {v:?}"),
             Self::Not(t) => write!(f, "OP_NOT ({t})"),
             Self::Negate(t) => write!(f, "OP_NEG ({t})"),
@@ -472,6 +485,13 @@ pub enum VmError {
     /// the stack has a different type. The first type here is the expected one, the second the
     /// actual type encountered.
     Type(Type, Type),
+    Io(Box<str>),
+}
+
+impl From<io::Error> for VmError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value.to_string().into())
+    }
 }
 
 /// An abstract representation of the types a [`Value`] can take. Used only for error reporting.
@@ -502,6 +522,7 @@ impl Display for VmError {
             Self::Type(expected, actual) => {
                 write!(f, "type error: expected {expected}, got {actual}")
             }
+            Self::Io(s) => write!(f, "io error: {s}"),
         }
     }
 }
@@ -514,15 +535,47 @@ mod test {
 
     use super::*;
 
+    struct TestWriter {
+        b: Vec<u8>,
+    }
+
+    impl TestWriter {
+        fn new() -> Self {
+            Self { b: Vec::new() }
+        }
+    }
+
+    impl Display for TestWriter {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(String::from_utf8(self.b.clone()).unwrap().as_str())
+        }
+    }
+
+    impl io::Write for TestWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.b.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.b.flush()
+        }
+    }
+
     #[test]
     fn push_and_pop_number() {
-        let instructions = vec![Op::Constant(Value::Number(6.4)), Op::Return];
+        let instructions = vec![
+            Op::Constant(Value::Number(6.4)),
+            Op::Print(Span::default()),
+            Op::Return,
+        ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(6.4))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "6.4\n");
     }
 
     #[test]
@@ -530,18 +583,19 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::True),
             Op::Not(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::False),
             Op::Not(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\ntrue\n");
     }
 
     #[test]
@@ -549,17 +603,15 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.0)),
             Op::Not(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Bool, Type::Number)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Bool, Type::Number)));
     }
 
     #[test]
@@ -567,14 +619,16 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.0)),
             Op::Negate(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(-1.0))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "-1\n");
     }
 
     #[test]
@@ -582,17 +636,15 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::True),
             Op::Negate(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -601,14 +653,16 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::Number(8.7)),
             Op::Add(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(10.0))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "10\n");
     }
 
     #[test]
@@ -619,14 +673,16 @@ mod test {
             Op::Add(Span::default()),
             Op::Constant("world".into()),
             Op::Add(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok("hello world".into())));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "\"hello world\"\n");
     }
 
     #[test]
@@ -635,17 +691,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::Add(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -654,14 +708,16 @@ mod test {
             Op::Constant(Value::Number(5.0)),
             Op::Constant(Value::Number(4.0)),
             Op::Subtract(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(1.0))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n");
     }
 
     #[test]
@@ -670,17 +726,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::Subtract(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -689,14 +743,16 @@ mod test {
             Op::Constant(Value::Number(5.0)),
             Op::Constant(Value::Number(4.0)),
             Op::Multiply(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(20.0))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "20\n");
     }
 
     #[test]
@@ -705,17 +761,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::Multiply(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -724,14 +778,16 @@ mod test {
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(4.0)),
             Op::Divide(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::Number(5.0))));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "5\n");
     }
 
     #[test]
@@ -740,17 +796,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::Divide(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -759,24 +813,24 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
             Op::LessThan(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
             Op::LessThan(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
             Op::LessThan(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\nfalse\ntrue\n");
     }
 
     #[test]
@@ -785,17 +839,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::LessThan(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -804,24 +856,24 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
             Op::LessThanOrEqual(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
             Op::LessThanOrEqual(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
             Op::LessThanOrEqual(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\ntrue\ntrue\n");
     }
 
     #[test]
@@ -830,17 +882,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::LessThanOrEqual(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -849,24 +899,24 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
             Op::GreaterThan(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
             Op::GreaterThan(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
             Op::GreaterThan(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\nfalse\nfalse\n");
     }
 
     #[test]
@@ -875,17 +925,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::GreaterThan(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -894,24 +942,24 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
             Op::GreaterThanOrEqual(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
             Op::GreaterThanOrEqual(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
             Op::GreaterThanOrEqual(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\ntrue\nfalse\n");
     }
 
     #[test]
@@ -923,14 +971,11 @@ mod test {
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(
-            vm.next(),
-            Some(Err(VmError::Type(Type::Number, Type::Bool)))
-        );
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
     }
 
     #[test]
@@ -939,89 +984,87 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(4.0)),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(20.0)),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::True),
             Op::Constant(Value::True),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::False),
             Op::Constant(Value::False),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::True),
             Op::Constant(Value::False),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant("hello".into()),
             Op::Constant("hello".into()),
             Op::Equals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant("hello".into()),
             Op::Constant("world".into()),
             Op::Equals(Span::default()),
+            Op::Print(Span::default()),
             Op::Return,
         ];
 
-        let mut vm = VirtualMachine::new();
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
 
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), None);
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(
+            test_writer.to_string(),
+            "true\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\n"
+        );
     }
-
+    
     #[test]
     fn not_equals() {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(4.0)),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(20.0)),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::True),
             Op::Constant(Value::True),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::False),
             Op::Constant(Value::False),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant(Value::True),
             Op::Constant(Value::False),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant("hello".into()),
             Op::Constant("hello".into()),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
             Op::Constant("hello".into()),
             Op::Constant("world".into()),
             Op::NotEquals(Span::default()),
-            Op::Return,
+            Op::Print(Span::default()),
+            Op::Return
         ];
-
-        let mut vm = VirtualMachine::new();
+    
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), Some(Ok(Value::False)));
-        assert_eq!(vm.next(), Some(Ok(Value::True)));
-        assert_eq!(vm.next(), None);
+    
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(
+            test_writer.to_string(),
+            "false\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
+        );
     }
 }

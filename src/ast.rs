@@ -2,14 +2,32 @@ use crate::scanner::Span;
 
 /// A complete statement of the language - this is the highest type of node in the AST.
 #[derive(Debug, Eq, PartialEq)]
-pub enum Statement {
-    Expr(Expression),
+pub enum Declaration {
+    Stmt(Statement)
 }
 
-impl From<Expression> for Statement {
-    fn from(value: Expression) -> Self {
-        Self::Expr(value)
+#[derive(Debug, Eq, PartialEq)]
+pub enum Statement {
+    Print(Print),
+    Expr(Expression)
+}
+
+impl From<Statement> for Declaration {
+    fn from(value: Statement) -> Self {
+        Self::Stmt(value)
     }
+}
+
+impl From<Expression> for Declaration {
+    fn from(value: Expression) -> Self {
+        Self::Stmt(Statement::Expr(value))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Print {
+    pub keyword: Span,
+    pub expr: Expression
 }
 
 /// A single expression.

@@ -7,6 +7,10 @@ fn main() {
 
     let config = lox::Config { debug: cli.debug };
 
+    if cli.debug {
+        println!("!!!Starting in debug mode!!!\n");
+    }
+
     let result = cli
         .file
         .map(|file| lox::interpret(file, &config))

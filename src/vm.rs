@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fmt::{Debug, Display},
-    mem,
+    mem, collections::HashSet, rc::Rc,
 };
 
 use crate::scanner::Span;
@@ -38,6 +38,7 @@ use crate::scanner::Span;
 pub struct VirtualMachine<I: Iterator<Item = Op>> {
     ops: Option<I>,
     stack: Stack,
+    strings: HashSet<Rc<str>>,
     errored: bool,
     debug: bool,
 }
@@ -80,6 +81,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         Self {
             ops: None,
             stack: Stack::new(),
+            strings: HashSet::new(),
             errored: false,
             debug: false,
         }
@@ -93,10 +95,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
 
     fn process_op(&mut self, op: Op) -> Result<Option<Value>, VmError> {
         match op {
-            Op::Constant(value) => {
-                self.stack.push(value);
-                Ok(None)
-            }
+            Op::Constant(value) => self.push_value(value),
             Op::Not(_) => match self.stack.peek_mut() {
                 Some(v @ Value::True) => {
                     let _ = mem::replace(v, Value::False);
@@ -138,13 +137,60 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
                 .and_then(|(a, b)| self.push_bool(a >= b)),
             Op::Equals(_) => self
                 .pop_two_values()
-                .and_then(|(v1, v2)| self.push_bool(v1 == v2)),
+                .and_then(|(v1, v2)| self.push_bool(self.values_eq(&v1, &v2))),
             Op::NotEquals(_) => self
                 .pop_two_values()
-                .and_then(|(v1, v2)| self.push_bool(v1 != v2)),
+                .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
             Op::Return => self.stack.pop().ok_or(VmError::NoValue).map(Some),
         }
     }
+
+    fn values_eq(&self, a: &Value, b: &Value) -> bool {
+        // because we're interning strings in the self.strings HashSet, we can use pointer equality
+        // for fast string comparisons, rather than the default PartialEq implementation which
+        // compares by value (the `values` in this function name refers to the `Value` enum, which
+        // is confusing but idk naming is hard).
+        // We use a method here rather than providing a custom PartialEq implementation because
+        // comparing by value is still useful for e.g. unit tests.
+        match a {
+            Value::Obj(Obj::String(s_a)) => match b {
+                Value::Obj(Obj::String(s_b)) => Rc::ptr_eq(s_a, s_b),
+                _ => false
+            },
+            _ => a == b
+        }
+    }
+
+    fn intern_string(&mut self, s: Rc<str>) -> Rc<str> {
+        if let Some(interned) = self.strings.get(&s) {
+            Rc::clone(interned)
+        } else {
+            self.strings.insert(Rc::clone(&s));
+            s
+        }
+    }
+
+    fn push_value(&mut self, value: Value) -> Result<Option<Value>, VmError> {
+        match value {
+            Value::Obj(Obj::String(s)) => self.push_string(s),
+            v => {
+                self.stack.push(v);
+                Ok(None)
+            }
+        }
+    }
+
+    fn push_string(&mut self, s: Rc<str>) -> Result<Option<Value>, VmError> {
+        let interned = self.intern_string(s);
+        self.stack.push(interned.into());
+        Ok(None)
+    }
+
+    fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
+        self.stack.push(if b { Value::True } else { Value::False });
+        Ok(None)
+    }
+
 
     fn binary_op_number<F: FnOnce(f64, f64) -> f64>(
         &mut self,
@@ -154,22 +200,20 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
             .and_then(|a| self.modify_number(|b| f(b, a)))
     }
 
-    fn binary_op_string<F: FnOnce(&str, &str) -> Box<str>>(
+    fn binary_op_string<F: FnOnce(&str, &str) -> Rc<str>>(
         &mut self,
         f: F,
     ) -> Result<Option<Value>, VmError> {
-        self.pop_string()
-            .and_then(|a| self.modify_string(|b| f(b, a.as_ref())))
-    }
-
-    fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
-        self.stack.push(if b { Value::True } else { Value::False });
-        Ok(None)
+        self.pop_two_strings().and_then(|(a, b)| self.push_string(f(&a, &b)))
     }
 
     fn pop_two_numbers(&mut self) -> Result<(f64, f64), VmError> {
         self.pop_number()
             .and_then(|b| self.pop_number().map(|a| (a, b)))
+    }
+
+    fn pop_two_strings(&mut self) -> Result<(Rc<str>, Rc<str>), VmError> {
+        self.pop_string().and_then(|b| self.pop_string().map(|a| (a, b)))
     }
 
     fn pop_two_values(&mut self) -> Result<(Value, Value), VmError> {
@@ -187,7 +231,7 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         }
     }
 
-    fn pop_string(&mut self) -> Result<Box<str>, VmError> {
+    fn pop_string(&mut self) -> Result<Rc<str>, VmError> {
         match self.stack.pop() {
             Some(Value::Obj(Obj::String(s))) => Ok(s),
             Some(Value::True | Value::False) => Err(VmError::Type(Type::String, Type::Bool)),
@@ -217,21 +261,6 @@ impl<I: Iterator<Item = Op>> VirtualMachine<I> {
         }
     }
 
-    fn modify_string<F: FnOnce(&str) -> Box<str>>(
-        &mut self,
-        f: F,
-    ) -> Result<Option<Value>, VmError> {
-        match self.stack.peek_mut() {
-            Some(Value::Obj(Obj::String(s))) => {
-                let _ = mem::replace(s, f(s));
-                Ok(None)
-            }
-            Some(Value::True | Value::False) => Err(VmError::Type(Type::String, Type::Bool)),
-            Some(Value::Nil) => Err(VmError::Type(Type::String, Type::Nil)),
-            Some(Value::Number(_)) => Err(VmError::Type(Type::String, Type::Number)),
-            None => Err(VmError::NoValue),
-        }
-    }
     /// Enables debugging, printing to stdout before processing each op code.
     ///
     /// Note that the debugger is _disabled_ by default.
@@ -379,6 +408,12 @@ impl From<&str> for Value {
     }
 }
 
+impl From<Rc<str>> for Value {
+    fn from(value: Rc<str>) -> Self {
+        Self::Obj(Obj::String(value))
+    }
+}
+
 impl Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -403,9 +438,10 @@ impl Display for Value {
     }
 }
 
+/// Represents heap allocated values.
 #[derive(PartialEq)]
 pub enum Obj {
-    String(Box<str>),
+    String(Rc<str>),
 }
 
 impl Debug for Obj {
@@ -920,6 +956,14 @@ mod test {
             Op::Constant(Value::False),
             Op::Equals(Span::default()),
             Op::Return,
+            Op::Constant("hello".into()),
+            Op::Constant("hello".into()),
+            Op::Equals(Span::default()),
+            Op::Return,
+            Op::Constant("hello".into()),
+            Op::Constant("world".into()),
+            Op::Equals(Span::default()),
+            Op::Return,
         ];
 
         let mut vm = VirtualMachine::new();
@@ -928,6 +972,8 @@ mod test {
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
+        assert_eq!(vm.next(), Some(Ok(Value::True)));
+        assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), None);
@@ -956,6 +1002,14 @@ mod test {
             Op::Constant(Value::False),
             Op::NotEquals(Span::default()),
             Op::Return,
+            Op::Constant("hello".into()),
+            Op::Constant("hello".into()),
+            Op::NotEquals(Span::default()),
+            Op::Return,
+            Op::Constant("hello".into()),
+            Op::Constant("world".into()),
+            Op::NotEquals(Span::default()),
+            Op::Return,
         ];
 
         let mut vm = VirtualMachine::new();
@@ -964,6 +1018,8 @@ mod test {
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
+        assert_eq!(vm.next(), Some(Ok(Value::False)));
+        assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), Some(Ok(Value::False)));
         assert_eq!(vm.next(), Some(Ok(Value::True)));
         assert_eq!(vm.next(), None);

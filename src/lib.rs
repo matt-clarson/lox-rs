@@ -23,14 +23,19 @@
 //! let mut buf: Vec<u8> = vec![];
 //! let mut vm = VirtualMachine::new(&mut buf);
 //!
-//! let source = "print 2 * (5 - 2);";
+//! let source = "
+//! var breakfast = \"beignets\";
+//! var beverage = \"cafe au lait\";
+//! breakfast = breakfast + \" with \" + beverage;
+//!
+//! print breakfast;";
 //! let ops = compiler.compile(source).unwrap();
 //!
 //! // need to make sure the compiler output is loaded into the vm before calling `exec`
 //! vm.load(ops);
 //!
 //! vm.exec().unwrap();
-//! assert_eq!(String::from_utf8(buf), Ok(String::from("6\n")));
+//! assert_eq!(String::from_utf8(buf), Ok(String::from("\"beignets with cafe au lait\"\n")));
 //! ```
 
 #[cfg(test)]

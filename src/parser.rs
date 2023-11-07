@@ -9,13 +9,14 @@ use crate::{
 /// [declarations](crate::ast::Declaration).
 pub struct Parser<'s> {
     scanner: Peekable<Scanner<'s>>,
+    curr: Option<Result<Token, ScanError>>,
 }
 
 impl<'s> From<Scanner<'s>> for Parser<'s> {
     fn from(scanner: Scanner<'s>) -> Self {
-        Self {
-            scanner: scanner.peekable(),
-        }
+        let mut scanner = scanner.peekable();
+        let curr = scanner.next();
+        Self { scanner, curr }
     }
 }
 
@@ -35,55 +36,66 @@ type ParseResult<T> = Result<T, ParseError>;
 
 impl<'s> Parser<'s> {
     fn declaration(&mut self) -> ParseResult<Declaration> {
-        self.statement()
+        match self.current()? {
+            Token::Var(_) => {
+                self.advance()?;
+                self.var_declaration()
+            }
+            _ => self.statement(),
+        }
+    }
+
+    fn var_declaration(&mut self) -> ParseResult<Declaration> {
+        let name = self.take_ident()?;
+        let expr = if let Token::Equal(_) = self.current()? {
+            self.advance()?;
+            self.expression()?
+        } else {
+            Expression::Primary(Primary::Nil)
+        };
+
+        let decl = Declaration::Var { name, expr };
+        self.take_semicolon().and(Ok(decl))
     }
 
     fn statement(&mut self) -> ParseResult<Declaration> {
-        match self.scanner.peek() {
-            Some(Ok(Token::Print(_))) => self.print(),
-            Some(Ok(_)) => self.expression_statement(),
-            Some(Err(e)) => Err(ParseError::Scan(*e)),
-            None => Err(ParseError::UnexpectedEof),
+        match self.current()? {
+            Token::Print(_) => {
+                self.advance()?;
+                let stmt = Declaration::Stmt(Statement::Print(self.expression()?));
+                self.take_semicolon().and(Ok(stmt))
+            }
+            _ => {
+                let stmt = Declaration::Stmt(Statement::Expr(self.expression()?));
+                self.take_semicolon().and(Ok(stmt))
+            }
         }
-        .map(Declaration::Stmt)
-    }
-
-    fn print(&mut self) -> ParseResult<Statement> {
-        let stmt = Statement::Print(Print {
-            keyword: self.advance()?.meta(),
-            expr: self.expression()?,
-        });
-        self.take_semicolon().and(Ok(stmt))
-    }
-
-    fn expression_statement(&mut self) -> ParseResult<Statement> {
-        let stmt = self.expression().map(Statement::Expr);
-        self.take_semicolon().and(stmt)
     }
 
     fn expression(&mut self) -> ParseResult<Expression> {
-        self.equality()
+        match self.curr_and_next()? {
+            (Token::Identifier(ident), Some(Token::Equal(_))) => {
+                self.advance().and_then(|_| self.advance())?;
+                let expr = Box::new(self.expression()?);
+                Ok(Expression::Assignment { ident, expr })
+            }
+            _ => self.equality(),
+        }
     }
 
     fn equality(&mut self) -> ParseResult<Expression> {
         let mut expr = self.comparison()?;
 
         loop {
-            expr = match self.peek_next() {
-                Ok(&Token::EqualEqual(operator)) => {
-                    Expression::Equality(Equality::Equals(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.comparison())?),
-                    }))
-                }
-                Ok(&Token::BangEqual(operator)) => {
-                    Expression::Equality(Equality::NotEquals(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.comparison())?),
-                    }))
-                }
+            expr = match self.current() {
+                Ok(Token::EqualEqual(_)) => Expression::Equality(Equality::Equals {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.comparison())?),
+                }),
+                Ok(Token::BangEqual(_)) => Expression::Equality(Equality::NotEquals {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.comparison())?),
+                }),
                 _ => break,
             };
         }
@@ -95,34 +107,24 @@ impl<'s> Parser<'s> {
         let mut expr = self.term()?;
 
         loop {
-            expr = match self.peek_next() {
-                Ok(&Token::Less(operator)) => {
-                    Expression::Comparison(Comparison::LessThan(BinaryExpression {
-                        operator,
+            expr = match self.current() {
+                Ok(Token::Less(_)) => Expression::Comparison(Comparison::LessThan {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.term())?),
+                }),
+                Ok(Token::LessEqual(_)) => Expression::Comparison(Comparison::LessThanOrEquals {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.term())?),
+                }),
+                Ok(Token::Greater(_)) => Expression::Comparison(Comparison::GreaterThan {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.term())?),
+                }),
+                Ok(Token::GreaterEqual(_)) => {
+                    Expression::Comparison(Comparison::GreaterThanOrEquals {
                         left: Box::new(expr),
                         right: Box::new(self.advance().and_then(|_| self.term())?),
-                    }))
-                }
-                Ok(&Token::LessEqual(operator)) => {
-                    Expression::Comparison(Comparison::LessThanOrEquals(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.term())?),
-                    }))
-                }
-                Ok(&Token::Greater(operator)) => {
-                    Expression::Comparison(Comparison::GreaterThan(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.term())?),
-                    }))
-                }
-                Ok(&Token::GreaterEqual(operator)) => {
-                    Expression::Comparison(Comparison::GreaterThanOrEquals(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.term())?),
-                    }))
+                    })
                 }
                 _ => break,
             };
@@ -135,17 +137,15 @@ impl<'s> Parser<'s> {
         let mut expr = self.factor()?;
 
         loop {
-            expr = match self.peek_next() {
-                Ok(&Token::Minus(operator)) => Expression::Term(Term::Minus(BinaryExpression {
-                    operator,
+            expr = match self.current() {
+                Ok(Token::Minus(_)) => Expression::Term(Term::Minus {
                     left: Box::new(expr),
                     right: Box::new(self.advance().and_then(|_| self.factor())?),
-                })),
-                Ok(&Token::Plus(operator)) => Expression::Term(Term::Plus(BinaryExpression {
-                    operator,
+                }),
+                Ok(Token::Plus(_)) => Expression::Term(Term::Plus {
                     left: Box::new(expr),
                     right: Box::new(self.advance().and_then(|_| self.factor())?),
-                })),
+                }),
                 _ => break,
             };
         }
@@ -157,21 +157,15 @@ impl<'s> Parser<'s> {
         let mut expr = self.unary()?;
 
         loop {
-            expr = match self.peek_next() {
-                Ok(&Token::Slash(operator)) => {
-                    Expression::Factor(Factor::Divide(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.unary())?),
-                    }))
-                }
-                Ok(&Token::Star(operator)) => {
-                    Expression::Factor(Factor::Multiply(BinaryExpression {
-                        operator,
-                        left: Box::new(expr),
-                        right: Box::new(self.advance().and_then(|_| self.unary())?),
-                    }))
-                }
+            expr = match self.current() {
+                Ok(Token::Slash(_)) => Expression::Factor(Factor::Divide {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.unary())?),
+                }),
+                Ok(Token::Star(_)) => Expression::Factor(Factor::Multiply {
+                    left: Box::new(expr),
+                    right: Box::new(self.advance().and_then(|_| self.unary())?),
+                }),
                 _ => break,
             };
         }
@@ -180,70 +174,85 @@ impl<'s> Parser<'s> {
     }
 
     fn unary(&mut self) -> ParseResult<Expression> {
-        match self.peek_next()? {
-            Token::Minus(operator) => Ok(Expression::Unary(Unary::Negate(UnaryExpression {
-                operator: *operator,
-                expr: Box::new(self.advance().and_then(|_| self.primary())?),
-            }))),
-            Token::Bang(operator) => Ok(Expression::Unary(Unary::Not(UnaryExpression {
-                operator: *operator,
-                expr: Box::new(self.advance().and_then(|_| self.primary())?),
-            }))),
+        match self.current()? {
+            Token::Minus(_) => Ok(Expression::Unary(Unary::Negate(Box::new(
+                self.advance().and_then(|_| self.primary())?,
+            )))),
+            Token::Bang(_) => Ok(Expression::Unary(Unary::Not(Box::new(
+                self.advance().and_then(|_| self.primary())?,
+            )))),
             _ => self.primary(),
         }
     }
 
     fn primary(&mut self) -> ParseResult<Expression> {
-        self.advance().and_then(|token| match token {
-            Token::LeftParen(start) => {
-                let expr = Box::new(self.expression()?);
-                let end = self.take_right_paren()?;
-                Ok(Expression::Primary(Primary::Group(GroupedExpression {
-                    start,
-                    end,
-                    expr,
-                })))
+        match self.current()? {
+            Token::LeftParen(_) => {
+                self.advance()?;
+                let expr = Expression::Primary(Primary::Group(Box::new(self.expression()?)));
+                self.take_right_paren().and(Ok(expr))
             }
-            Token::Number(t) => Ok(Expression::Primary(Primary::Number(t))),
-            Token::String(t) => Ok(Expression::Primary(Primary::String(t))),
-            Token::Identifier(t) => Ok(Expression::Primary(Primary::Ident(t))),
-            Token::Nil(t) => Ok(Expression::Primary(Primary::Nil(t))),
-            Token::True(t) => Ok(Expression::Primary(Primary::True(t))),
-            Token::False(t) => Ok(Expression::Primary(Primary::False(t))),
-            _ => Err(ParseError::UnexpectedToken(token)),
-        })
-    }
-
-    fn take_semicolon(&mut self) -> ParseResult<Span> {
-        self.advance().and_then(|token| match token {
-            Token::Semicolon(t) => Ok(t),
-            _ => Err(ParseError::WrongToken(WrongToken {
-                wanted: ";",
-                actual: token,
-            })),
-        })
-    }
-
-    fn take_right_paren(&mut self) -> ParseResult<Span> {
-        self.advance().and_then(|token| match token {
-            Token::RightParen(t) => Ok(t),
-            _ => Err(ParseError::WrongToken(WrongToken {
-                wanted: ")",
-                actual: token,
-            })),
-        })
-    }
-
-    fn peek_next(&mut self) -> ParseResult<&Token> {
-        match self.scanner.peek() {
-            Some(Ok(token)) => Ok(token),
-            Some(Err(e)) => Err(ParseError::Scan(*e)),
-            None => Err(ParseError::UnexpectedEof),
+            Token::Number(t) => self
+                .advance()
+                .and(Ok(Expression::Primary(Primary::Number(t)))),
+            Token::String(t) => self
+                .advance()
+                .and(Ok(Expression::Primary(Primary::String(t)))),
+            Token::Identifier(t) => self
+                .advance()
+                .and(Ok(Expression::Primary(Primary::Ident(t)))),
+            Token::Nil(_) => self.advance().and(Ok(Expression::Primary(Primary::Nil))),
+            Token::True(_) => self.advance().and(Ok(Expression::Primary(Primary::True))),
+            Token::False(_) => self.advance().and(Ok(Expression::Primary(Primary::False))),
+            token => Err(ParseError::UnexpectedToken(token)),
         }
     }
 
-    fn advance(&mut self) -> ParseResult<Token> {
-        match self.scanner.next() {
+    fn take_ident(&mut self) -> ParseResult<Span> {
+        match self.current()? {
+            Token::Identifier(t) => self.advance().and(Ok(t)),
+            token => Err(ParseError::WrongToken(WrongToken {
+                wanted: "[identifier]",
+                actual: token,
+            })),
+        }
+    }
+
+    fn take_semicolon(&mut self) -> ParseResult<Span> {
+        match self.current()? {
+            Token::Semicolon(t) => self.advance().and(Ok(t)),
+            token => Err(ParseError::WrongToken(WrongToken {
+                wanted: ";",
+                actual: token,
+            })),
+        }
+    }
+
+    fn take_right_paren(&mut self) -> ParseResult<Span> {
+        match self.current()? {
+            Token::RightParen(t) => self.advance().and(Ok(t)),
+            token => Err(ParseError::WrongToken(WrongToken {
+                wanted: ")",
+                actual: token,
+            })),
+        }
+    }
+
+    fn advance(&mut self) -> ParseResult<()> {
+        self.curr = self.scanner.next();
+        Ok(())
+    }
+
+    fn curr_and_next(&mut self) -> ParseResult<(Token, Option<&Token>)> {
+        self.current().and_then(|curr| match self.scanner.peek() {
+            Some(Ok(next)) => Ok((curr, Some(next))),
+            None => Ok((curr, None)),
+            Some(Err(e)) => Err(e.into()),
+        })
+    }
+
+    fn current(&self) -> ParseResult<Token> {
+        match self.curr {
             Some(Ok(token)) => Ok(token),
             Some(Err(e)) => Err(ParseError::Scan(e)),
             None => Err(ParseError::UnexpectedEof),
@@ -251,7 +260,7 @@ impl<'s> Parser<'s> {
     }
 
     fn finished(&mut self) -> bool {
-        self.scanner.peek().is_none()
+        self.scanner.peek().or(self.curr.as_ref()).is_none()
     }
 }
 
@@ -286,6 +295,18 @@ impl Display for ParseError {
 }
 
 impl Error for ParseError {}
+
+impl From<ScanError> for ParseError {
+    fn from(value: ScanError) -> Self {
+        Self::Scan(value)
+    }
+}
+
+impl From<&ScanError> for ParseError {
+    fn from(value: &ScanError) -> Self {
+        Self::Scan(*value)
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -363,11 +384,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
-                Primary::Nil(Span {
-                    start: 0,
-                    length: 3,
-                    line: 1
-                })
+                Primary::Nil
             )))))
         );
     }
@@ -383,11 +400,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
-                Primary::True(Span {
-                    start: 0,
-                    length: 4,
-                    line: 1
-                })
+                Primary::True
             )))))
         );
     }
@@ -403,11 +416,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
-                Primary::False(Span {
-                    start: 0,
-                    length: 5,
-                    line: 1
-                })
+                Primary::False
             )))))
         );
     }
@@ -423,18 +432,11 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Unary(
-                Unary::Negate(UnaryExpression {
-                    operator: Span {
-                        start: 0,
-                        length: 1,
-                        line: 1
-                    },
-                    expr: Box::new(Expression::Primary(Primary::Number(Span {
-                        start: 1,
-                        length: 1,
-                        line: 1
-                    })))
-                })
+                Unary::Negate(Box::new(Expression::Primary(Primary::Number(Span {
+                    start: 1,
+                    length: 1,
+                    line: 1
+                }))))
             )))))
         );
     }
@@ -450,18 +452,11 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Unary(
-                Unary::Not(UnaryExpression {
-                    operator: Span {
-                        start: 0,
-                        length: 1,
-                        line: 1
-                    },
-                    expr: Box::new(Expression::Primary(Primary::Ident(Span {
-                        start: 1,
-                        length: 1,
-                        line: 1
-                    })))
-                })
+                Unary::Not(Box::new(Expression::Primary(Primary::Ident(Span {
+                    start: 1,
+                    length: 1,
+                    line: 1
+                }))))
             )))))
         );
     }
@@ -477,18 +472,8 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
-                Factor::Divide(BinaryExpression {
-                    operator: Span {
-                        start: 6,
-                        length: 1,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Factor(Factor::Divide(BinaryExpression {
-                        operator: Span {
-                            start: 2,
-                            length: 1,
-                            line: 1,
-                        },
+                Factor::Divide {
+                    left: Box::new(Expression::Factor(Factor::Divide {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
@@ -499,13 +484,13 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
+                    })),
                     right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
                     }))),
-                })
+                }
             )))))
         );
     }
@@ -521,18 +506,8 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
-                Factor::Multiply(BinaryExpression {
-                    operator: Span {
-                        start: 6,
-                        length: 1,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Factor(Factor::Multiply(BinaryExpression {
-                        operator: Span {
-                            start: 2,
-                            length: 1,
-                            line: 1,
-                        },
+                Factor::Multiply {
+                    left: Box::new(Expression::Factor(Factor::Multiply {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
@@ -543,13 +518,13 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
+                    })),
                     right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
                     }))),
-                })
+                }
             )))))
         );
     }
@@ -565,37 +540,22 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Factor(
-                Factor::Multiply(BinaryExpression {
-                    operator: Span {
-                        start: 3,
-                        length: 1,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Unary(Unary::Negate(UnaryExpression {
-                        operator: Span {
-                            start: 0,
-                            length: 1,
-                            line: 1,
-                        },
-                        expr: Box::new(Expression::Primary(Primary::Number(Span {
+                Factor::Multiply {
+                    left: Box::new(Expression::Unary(Unary::Negate(Box::new(
+                        Expression::Primary(Primary::Number(Span {
                             start: 1,
                             length: 1,
                             line: 1,
-                        }))),
-                    }))),
-                    right: Box::new(Expression::Unary(Unary::Negate(UnaryExpression {
-                        operator: Span {
-                            start: 5,
-                            length: 1,
-                            line: 1,
-                        },
-                        expr: Box::new(Expression::Primary(Primary::Number(Span {
+                        }))
+                    ),))),
+                    right: Box::new(Expression::Unary(Unary::Negate(Box::new(
+                        Expression::Primary(Primary::Number(Span {
                             start: 6,
                             length: 1,
                             line: 1,
-                        }))),
-                    }))),
-                })
+                        }))
+                    ),))),
+                }
             )))))
         );
     }
@@ -611,18 +571,8 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
-                Term::Minus(BinaryExpression {
-                    operator: Span {
-                        start: 6,
-                        length: 1,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Term(Term::Minus(BinaryExpression {
-                        operator: Span {
-                            start: 2,
-                            length: 1,
-                            line: 1,
-                        },
+                Term::Minus {
+                    left: Box::new(Expression::Term(Term::Minus {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
@@ -633,13 +583,13 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
+                    })),
                     right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
                     }))),
-                })
+                }
             )))))
         );
     }
@@ -655,18 +605,8 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
-                Term::Plus(BinaryExpression {
-                    operator: Span {
-                        start: 6,
-                        length: 1,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Term(Term::Plus(BinaryExpression {
-                        operator: Span {
-                            start: 2,
-                            length: 1,
-                            line: 1,
-                        },
+                Term::Plus {
+                    left: Box::new(Expression::Term(Term::Plus {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 0,
                             length: 1,
@@ -677,13 +617,13 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
+                    })),
                     right: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 8,
                         length: 1,
                         line: 1
                     }))),
-                })
+                }
             )))))
         );
     }
@@ -699,23 +639,13 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Term(
-                Term::Plus(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 1,
-                        line: 1
-                    },
+                Term::Plus {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Factor(Factor::Divide(BinaryExpression {
-                        operator: Span {
-                            start: 6,
-                            length: 1,
-                            line: 1,
-                        },
+                    right: Box::new(Expression::Factor(Factor::Divide {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
@@ -726,8 +656,8 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
-                })
+                    })),
+                }
             )))))
         );
     }
@@ -743,12 +673,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Comparison(Comparison::LessThan(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 1,
-                        line: 1
-                    },
+                Expression::Comparison(Comparison::LessThan {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -759,7 +684,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -775,12 +700,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Comparison(Comparison::LessThanOrEquals(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 2,
-                        line: 1
-                    },
+                Expression::Comparison(Comparison::LessThanOrEquals {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -791,7 +711,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -807,12 +727,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Comparison(Comparison::GreaterThan(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 1,
-                        line: 1
-                    },
+                Expression::Comparison(Comparison::GreaterThan {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -823,7 +738,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -839,12 +754,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Comparison(Comparison::GreaterThanOrEquals(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 2,
-                        line: 1
-                    },
+                Expression::Comparison(Comparison::GreaterThanOrEquals {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -855,7 +765,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -871,23 +781,13 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Comparison(Comparison::GreaterThan(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 1,
-                        line: 1
-                    },
+                Expression::Comparison(Comparison::GreaterThan {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
                         line: 1,
                     }))),
-                    right: Box::new(Expression::Term(Term::Minus(BinaryExpression {
-                        operator: Span {
-                            start: 6,
-                            length: 1,
-                            line: 1,
-                        },
+                    right: Box::new(Expression::Term(Term::Minus {
                         left: Box::new(Expression::Primary(Primary::Number(Span {
                             start: 4,
                             length: 1,
@@ -898,8 +798,8 @@ mod test {
                             length: 1,
                             line: 1,
                         }))),
-                    }))),
-                }))
+                    })),
+                })
             ))))
         );
     }
@@ -915,12 +815,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Equality(Equality::Equals(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 2,
-                        line: 1
-                    },
+                Expression::Equality(Equality::Equals {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -931,7 +826,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -947,12 +842,7 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Equality(Equality::NotEquals(BinaryExpression {
-                    operator: Span {
-                        start: 2,
-                        length: 2,
-                        line: 1
-                    },
+                Expression::Equality(Equality::NotEquals {
                     left: Box::new(Expression::Primary(Primary::Number(Span {
                         start: 0,
                         length: 1,
@@ -963,7 +853,7 @@ mod test {
                         length: 1,
                         line: 1,
                     }))),
-                }))
+                })
             ))))
         );
     }
@@ -979,37 +869,21 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(
-                Expression::Equality(Equality::NotEquals(BinaryExpression {
-                    operator: Span {
-                        start: 5,
-                        length: 2,
-                        line: 1
-                    },
-                    left: Box::new(Expression::Primary(Primary::True(Span {
-                        start: 0,
-                        length: 4,
-                        line: 1,
-                    }))),
-                    right: Box::new(Expression::Comparison(Comparison::GreaterThan(
-                        BinaryExpression {
-                            operator: Span {
-                                start: 10,
-                                length: 1,
-                                line: 1,
-                            },
-                            left: Box::new(Expression::Primary(Primary::Number(Span {
-                                start: 8,
-                                length: 1,
-                                line: 1,
-                            }))),
-                            right: Box::new(Expression::Primary(Primary::Number(Span {
-                                start: 12,
-                                length: 1,
-                                line: 1,
-                            }))),
-                        }
-                    ))),
-                }))
+                Expression::Equality(Equality::NotEquals {
+                    left: Box::new(Expression::Primary(Primary::True)),
+                    right: Box::new(Expression::Comparison(Comparison::GreaterThan {
+                        left: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 8,
+                            length: 1,
+                            line: 1,
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 12,
+                            length: 1,
+                            line: 1,
+                        }))),
+                    })),
+                })
             ))))
         );
     }
@@ -1025,35 +899,18 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Primary(
-                Primary::Group(GroupedExpression {
-                    start: Span {
-                        start: 0,
+                Primary::Group(Box::new(Expression::Term(Term::Plus {
+                    left: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 1,
                         length: 1,
-                        line: 1
-                    },
-                    end: Span {
-                        start: 6,
-                        length: 1,
-                        line: 1
-                    },
-                    expr: Box::new(Expression::Term(Term::Plus(BinaryExpression {
-                        operator: Span {
-                            start: 3,
-                            length: 1,
-                            line: 1,
-                        },
-                        left: Box::new(Expression::Primary(Primary::Number(Span {
-                            start: 1,
-                            length: 1,
-                            line: 1,
-                        }))),
-                        right: Box::new(Expression::Primary(Primary::Number(Span {
-                            start: 5,
-                            length: 1,
-                            line: 1,
-                        }))),
+                        line: 1,
                     }))),
-                })
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 5,
+                        length: 1,
+                        line: 1,
+                    }))),
+                })),)
             )))))
         );
     }
@@ -1068,18 +925,141 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Declaration::Stmt(Statement::Print(Print {
-                keyword: Span {
-                    start: 0,
-                    length: 5,
-                    line: 1
-                },
-                expr: Expression::Primary(Primary::Ident(Span {
+            Some(Ok(Declaration::Stmt(Statement::Print(
+                Expression::Primary(Primary::Ident(Span {
                     start: 6,
                     length: 1,
                     line: 1
                 }))
-            }))))
+            ))))
+        );
+    }
+
+    #[test]
+    fn parse_var_assignment() {
+        let s = "var x = 7;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Var {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1
+                },
+                expr: Expression::Primary(Primary::Number(Span {
+                    start: 8,
+                    length: 1,
+                    line: 1
+                }))
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_var_declaration() {
+        let s = "var x;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Var {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1
+                },
+                expr: Expression::Primary(Primary::Nil)
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_assignment() {
+        let s = "x = 5.3;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Assignment {
+                    ident: Span {
+                        start: 0,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 4,
+                        length: 3,
+                        line: 1
+                    })))
+                }
+            ))))
+        );
+    }
+
+    #[test]
+    fn parse_invalid_reassignment() {
+        let s = "x * y = 5.3;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Err(ParseError::WrongToken(WrongToken {
+                wanted: ";",
+                actual: Token::Equal(Span {
+                    start: 6,
+                    length: 1,
+                    line: 1
+                })
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_multi_assignment() {
+        let s = "x = y = 1;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(
+                Expression::Assignment {
+                    ident: Span {
+                        start: 0,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Assignment {
+                        ident: Span {
+                            start: 4,
+                            length: 1,
+                            line: 1
+                        },
+                        expr: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 8,
+                            length: 1,
+                            line: 1
+                        })))
+                    })
+                }
+            ))))
         );
     }
 }

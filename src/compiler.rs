@@ -61,6 +61,12 @@ impl<'c> SourceCompiler<'c> {
     ) -> Result<(), CompileError> {
         match declaration {
             Declaration::Stmt(stmt) => self.compile_statement(ops, stmt),
+            Declaration::Var { name, expr } => {
+                self.compile_expression(ops, expr)?;
+                let ident = self.span(name);
+                ops.push(Op::DefineGlobal(ident.into()));
+                Ok(())
+            }
         }
     }
 
@@ -70,9 +76,9 @@ impl<'c> SourceCompiler<'c> {
         statement: &Statement,
     ) -> Result<(), CompileError> {
         match statement {
-            Statement::Print(print) => {
-                self.compile_expression(ops, &print.expr)?;
-                ops.push(Op::Print(print.keyword));
+            Statement::Print(expr) => {
+                self.compile_expression(ops, expr)?;
+                ops.push(Op::Print);
                 Ok(())
             }
             Statement::Expr(expr) => {
@@ -90,15 +96,15 @@ impl<'c> SourceCompiler<'c> {
                 let op = Op::Constant(n.into());
                 ops.push(op);
             }
-            Expression::Primary(Primary::True(_)) => {
+            Expression::Primary(Primary::True) => {
                 let op = Op::Constant(Value::True);
                 ops.push(op);
             }
-            Expression::Primary(Primary::False(_)) => {
+            Expression::Primary(Primary::False) => {
                 let op = Op::Constant(Value::False);
                 ops.push(op);
             }
-            Expression::Primary(Primary::Nil(_)) => {
+            Expression::Primary(Primary::Nil) => {
                 let op = Op::Constant(Value::Nil);
                 ops.push(op);
             }
@@ -107,80 +113,77 @@ impl<'c> SourceCompiler<'c> {
                 let op = Op::Constant(s.into());
                 ops.push(op);
             }
-            Expression::Primary(Primary::Group(group)) => {
-                self.compile_expression(ops, &group.expr)?;
+            Expression::Primary(Primary::Ident(t)) => {
+                let s = self.span(t);
+                let op = Op::GetGlobal(s.into());
+                ops.push(op);
+            }
+            Expression::Primary(Primary::Group(expr)) => {
+                self.compile_expression(ops, expr)?;
             }
             Expression::Unary(Unary::Negate(negate)) => {
-                self.compile_expression(ops, &negate.expr)?;
-                let op = Op::Negate(negate.operator);
-                ops.push(op);
+                self.compile_expression(ops, negate)?;
+                ops.push(Op::Negate);
             }
             Expression::Unary(Unary::Not(not)) => {
-                self.compile_expression(ops, &not.expr)?;
-                let op = Op::Not(not.operator);
-                ops.push(op);
+                self.compile_expression(ops, not)?;
+                ops.push(Op::Not);
             }
-            Expression::Factor(Factor::Multiply(mult)) => {
-                self.compile_expression(ops, &mult.left)?;
-                self.compile_expression(ops, &mult.right)?;
-                let op = Op::Multiply(mult.operator);
-                ops.push(op);
+            Expression::Factor(Factor::Multiply { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::Multiply);
             }
-            Expression::Factor(Factor::Divide(div)) => {
-                self.compile_expression(ops, &div.left)?;
-                self.compile_expression(ops, &div.right)?;
-                let op = Op::Divide(div.operator);
-                ops.push(op);
+            Expression::Factor(Factor::Divide { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::Divide);
             }
-            Expression::Term(Term::Plus(plus)) => {
-                self.compile_expression(ops, &plus.left)?;
-                self.compile_expression(ops, &plus.right)?;
-                let op = Op::Add(plus.operator);
-                ops.push(op);
+            Expression::Term(Term::Plus { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::Add);
             }
-            Expression::Term(Term::Minus(minus)) => {
-                self.compile_expression(ops, &minus.left)?;
-                self.compile_expression(ops, &minus.right)?;
-                let op = Op::Subtract(minus.operator);
-                ops.push(op);
+            Expression::Term(Term::Minus { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::Subtract);
             }
-            Expression::Comparison(Comparison::LessThan(lt)) => {
-                self.compile_expression(ops, &lt.left)?;
-                self.compile_expression(ops, &lt.right)?;
-                let op = Op::LessThan(lt.operator);
-                ops.push(op);
+            Expression::Comparison(Comparison::LessThan { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::LessThan);
             }
-            Expression::Comparison(Comparison::LessThanOrEquals(lte)) => {
-                self.compile_expression(ops, &lte.left)?;
-                self.compile_expression(ops, &lte.right)?;
-                let op = Op::LessThanOrEqual(lte.operator);
-                ops.push(op);
+            Expression::Comparison(Comparison::LessThanOrEquals { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::LessThanOrEqual);
             }
-            Expression::Comparison(Comparison::GreaterThan(gt)) => {
-                self.compile_expression(ops, &gt.left)?;
-                self.compile_expression(ops, &gt.right)?;
-                let op = Op::GreaterThan(gt.operator);
-                ops.push(op);
+            Expression::Comparison(Comparison::GreaterThan { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::GreaterThan);
             }
-            Expression::Comparison(Comparison::GreaterThanOrEquals(gte)) => {
-                self.compile_expression(ops, &gte.left)?;
-                self.compile_expression(ops, &gte.right)?;
-                let op = Op::GreaterThanOrEqual(gte.operator);
-                ops.push(op);
+            Expression::Comparison(Comparison::GreaterThanOrEquals { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::GreaterThanOrEqual);
             }
-            Expression::Equality(Equality::Equals(eq)) => {
-                self.compile_expression(ops, &eq.left)?;
-                self.compile_expression(ops, &eq.right)?;
-                let op = Op::Equals(eq.operator);
-                ops.push(op);
+            Expression::Equality(Equality::Equals { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::Equals);
             }
-            Expression::Equality(Equality::NotEquals(neq)) => {
-                self.compile_expression(ops, &neq.left)?;
-                self.compile_expression(ops, &neq.right)?;
-                let op = Op::NotEquals(neq.operator);
-                ops.push(op);
+            Expression::Equality(Equality::NotEquals { left, right }) => {
+                self.compile_expression(ops, left)?;
+                self.compile_expression(ops, right)?;
+                ops.push(Op::NotEquals);
             }
-            _ => unimplemented!(),
+            Expression::Assignment {ident, expr} => {
+                self.compile_expression(ops, expr)?;
+                let s = self.span(ident);
+                ops.push(Op::SetGlobal(s.into()));
+            }
         };
         Ok(())
     }
@@ -301,17 +304,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![
-                Op::Constant(Value::False),
-                Op::Not(Span {
-                    start: 0,
-                    length: 1,
-                    line: 1
-                }),
-                Op::Pop,
-                Op::Return
-            ]
-            .into())
+            Ok(vec![Op::Constant(Value::False), Op::Not, Op::Pop, Op::Return].into())
         );
     }
 
@@ -325,11 +318,7 @@ mod test {
             compiler.compile(s),
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
-                Op::Negate(Span {
-                    start: 0,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Negate,
                 Op::Pop,
                 Op::Return
             ]
@@ -348,11 +337,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::Add(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Add,
                 Op::Pop,
                 Op::Return
             ]
@@ -371,11 +356,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::Subtract(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Subtract,
                 Op::Pop,
                 Op::Return
             ]
@@ -394,17 +375,9 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Obj(Obj::String("hello".into()))),
                 Op::Constant(Value::Obj(Obj::String(" ".into()))),
-                Op::Add(Span {
-                    start: 8,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Add,
                 Op::Constant(Value::Obj(Obj::String("world".into()))),
-                Op::Add(Span {
-                    start: 14,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Add,
                 Op::Pop,
                 Op::Return
             ]
@@ -423,11 +396,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::Multiply(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Multiply,
                 Op::Pop,
                 Op::Return
             ]
@@ -446,11 +415,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::Divide(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Divide,
                 Op::Pop,
                 Op::Return
             ]
@@ -469,11 +434,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::LessThan(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::LessThan,
                 Op::Pop,
                 Op::Return
             ]
@@ -492,11 +453,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::LessThanOrEqual(Span {
-                    start: 4,
-                    length: 2,
-                    line: 1
-                }),
+                Op::LessThanOrEqual,
                 Op::Pop,
                 Op::Return
             ]
@@ -515,11 +472,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::GreaterThan(Span {
-                    start: 4,
-                    length: 1,
-                    line: 1
-                }),
+                Op::GreaterThan,
                 Op::Pop,
                 Op::Return
             ]
@@ -538,11 +491,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::GreaterThanOrEqual(Span {
-                    start: 4,
-                    length: 2,
-                    line: 1
-                }),
+                Op::GreaterThanOrEqual,
                 Op::Pop,
                 Op::Return
             ]
@@ -561,11 +510,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::Equals(Span {
-                    start: 4,
-                    length: 2,
-                    line: 1
-                }),
+                Op::Equals,
                 Op::Pop,
                 Op::Return
             ]
@@ -584,11 +529,7 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(1.4)),
                 Op::Constant(Value::Number(6.5)),
-                Op::NotEquals(Span {
-                    start: 4,
-                    length: 2,
-                    line: 1
-                }),
+                Op::NotEquals,
                 Op::Pop,
                 Op::Return
             ]
@@ -608,16 +549,8 @@ mod test {
                 Op::Constant(Value::Number(2.0)),
                 Op::Constant(Value::Number(1.0)),
                 Op::Constant(Value::Number(5.0)),
-                Op::Add(Span {
-                    start: 7,
-                    length: 1,
-                    line: 1
-                }),
-                Op::Multiply(Span {
-                    start: 2,
-                    length: 1,
-                    line: 1
-                }),
+                Op::Add,
+                Op::Multiply,
                 Op::Pop,
                 Op::Return
             ]
@@ -633,13 +566,74 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
+            Ok(vec![Op::Constant(Value::Number(123.0)), Op::Print, Op::Return].into())
+        );
+    }
+
+    #[test]
+    fn compile_global_declaration() {
+        let s = "var x = 7;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
             Ok(vec![
-                Op::Constant(Value::Number(123.0)),
-                Op::Print(Span {
-                    start: 0,
-                    length: 5,
-                    line: 1
-                }),
+                Op::Constant(Value::Number(7.0)),
+                Op::DefineGlobal("x".into()),
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_global_declaration_unassigned() {
+        let s = "var x;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Nil),
+                Op::DefineGlobal("x".into()),
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+
+    #[test]
+    fn compile_global_access() {
+        let s = "x;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::GetGlobal("x".into()),
+                Op::Pop,
+                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_global_assignment() {
+        let s = "x = 7;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(7.0.into()),
+                Op::SetGlobal("x".into()),
+                Op::Pop,
                 Op::Return
             ]
             .into())

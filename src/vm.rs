@@ -1,13 +1,11 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, HashMap},
     error::Error,
     fmt::{Debug, Display},
     io::{self, Write},
     mem,
     rc::Rc,
 };
-
-use crate::scanner::Span;
 
 /// Stack-based VM for executing compiled Lox bytecode.
 ///
@@ -23,13 +21,12 @@ use crate::scanner::Span;
 ///
 /// ```
 /// use lox::vm::*;
-/// use lox::scanner::Span;
 ///
 /// let instructions = vec![
 ///     Op::Constant(Value::Number(1.3)),
 ///     Op::Constant(Value::Number(8.7)),
-///     Op::Add(Span::default()),
-///     Op::Print(Span::default()),
+///     Op::Add,
+///     Op::Print,
 ///     Op::Return,
 /// ];
 ///
@@ -44,6 +41,7 @@ pub struct VirtualMachine<I: Iterator<Item = Op>, W: Write> {
     stdout: W,
     ops: Option<I>,
     stack: Stack,
+    globals: HashMap<Rc<str>, Value>,
     strings: HashSet<Rc<str>>,
     debug: bool,
 }
@@ -60,6 +58,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
             stdout,
             ops: None,
             stack: Stack::new(),
+            globals: HashMap::new(),
             strings: HashSet::new(),
             debug: false,
         }
@@ -92,7 +91,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
     fn process_op(&mut self, op: Op) -> Result<Option<()>, VmError> {
         match op {
             Op::Constant(value) => self.push_value(value),
-            Op::Not(_) => match self.stack.peek_mut() {
+            Op::Not => match self.stack.peek_mut() {
                 Some(v @ Value::True) => {
                     let _ = mem::replace(v, Value::False);
                     Ok(None)
@@ -106,8 +105,8 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Bool, Type::String)),
                 None => Err(VmError::NoValue),
             },
-            Op::Negate(_) => self.modify_number(|n| -n),
-            Op::Add(_) => match self.stack.peek() {
+            Op::Negate => self.modify_number(|n| -n),
+            Op::Add => match self.stack.peek() {
                 Some(Value::Number(_)) => self.binary_op_number(|a, b| a + b),
                 Some(Value::Obj(Obj::String(_))) => {
                     self.binary_op_string(|a, b| (String::from(a) + b).into())
@@ -116,36 +115,59 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
                 None => Err(VmError::NoValue),
             },
-            Op::Subtract(_) => self.binary_op_number(|a, b| a - b),
-            Op::Multiply(_) => self.binary_op_number(|a, b| a * b),
-            Op::Divide(_) => self.binary_op_number(|a, b| a / b),
-            Op::LessThan(_) => self
+            Op::Subtract => self.binary_op_number(|a, b| a - b),
+            Op::Multiply => self.binary_op_number(|a, b| a * b),
+            Op::Divide => self.binary_op_number(|a, b| a / b),
+            Op::LessThan => self
                 .pop_two_numbers()
                 .and_then(|(a, b)| self.push_bool(a < b)),
-            Op::LessThanOrEqual(_) => self
+            Op::LessThanOrEqual => self
                 .pop_two_numbers()
                 .and_then(|(a, b)| self.push_bool(a <= b)),
-            Op::GreaterThan(_) => self
+            Op::GreaterThan => self
                 .pop_two_numbers()
                 .and_then(|(a, b)| self.push_bool(a > b)),
-            Op::GreaterThanOrEqual(_) => self
+            Op::GreaterThanOrEqual => self
                 .pop_two_numbers()
                 .and_then(|(a, b)| self.push_bool(a >= b)),
-            Op::Equals(_) => self
+            Op::Equals => self
                 .pop_two_values()
                 .and_then(|(v1, v2)| self.push_bool(self.values_eq(&v1, &v2))),
-            Op::NotEquals(_) => self
+            Op::NotEquals => self
                 .pop_two_values()
                 .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
             Op::Return => Ok(Some(())),
             Op::Pop => self.stack.pop().ok_or(VmError::NoValue).and(Ok(None)),
-            Op::Print(_) => {
+            Op::Print => {
                 let v = self.stack.pop().ok_or(VmError::NoValue)?;
                 if self.debug {
-                    self.stdout.write(b"out= ")?;
+                    self.stdout.write_all(b"out= ")?;
                 }
                 self.stdout.write_all(v.to_string().as_bytes())?;
-                self.stdout.write(b"\n")?;
+                self.stdout.write_all(b"\n")?;
+                Ok(None)
+            }
+            Op::DefineGlobal(ident) => {
+                let interned = unsafe {self.intern_string(ident.into_str())};
+                let value = self.pop_value()?;
+                self.globals.insert(interned, value);
+                Ok(None)
+            }
+            Op::GetGlobal(ident) => {
+                let s = unsafe {ident.into_str()};
+                if let Some(value) = self.globals.get(&s) {
+                    self.push_value(value.clone())
+                } else {
+                    Err(VmError::Undefined(s.as_ref().into()))
+                }
+            }
+            Op::SetGlobal(ident) => {
+                let s = unsafe {ident.into_str()};
+                if self.globals.get(&s).is_none() {
+                    return Err(VmError::Undefined(s.as_ref().into()))
+                }
+                let new_value = self.clone_value()?;
+                self.globals.insert(s, new_value);
                 Ok(None)
             }
         }
@@ -255,6 +277,13 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
         }
     }
 
+    fn clone_value(&mut self) -> Result<Value,VmError> {
+        match self.stack.peek() {
+            Some(v) => Ok(v.clone()),
+            None => Err(VmError::NoValue)
+        }
+    }
+
     fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<()>, VmError> {
         match self.stack.peek_mut() {
             Some(Value::Number(n)) => {
@@ -296,39 +325,53 @@ pub enum Op {
     /// Pops the top value from the stack and discards it.
     Pop,
     /// Pops the top value from the stack and sends it to stdout.
-    Print(Span),
+    Print,
     /// Pushes the wrapped [`Value`] onto the stack.
     Constant(Value),
     /// Flips the top value on the stack, if it is a boolean.
-    Not(Span),
+    Not,
     /// Negates the top number on the stack.
-    Negate(Span),
+    Negate,
     /// Takes the top two numbers on the stack and pushes the sum onto the stack.
-    Add(Span),
+    Add,
     /// Takes the top two numbers on the stack and pushes the difference onto the stack.
-    Subtract(Span),
+    Subtract,
     /// Takes the top two numbers on the stack and pushes the product onto the stack.
-    Multiply(Span),
+    Multiply,
     /// Takes the top two numbers on the stack and pushes the quotient onto the stack.
-    Divide(Span),
+    Divide,
     /// Takes the top two numbers and pushes true onto the stack if the first is less than the
     /// second, otherwise pushes false.
-    LessThan(Span),
+    LessThan,
     /// Takes the top two numbers and pushes true onto the stack if the first is less than or equal
     /// to the second, otherwise pushes false.
-    LessThanOrEqual(Span),
+    LessThanOrEqual,
     /// Takes the top two numbers and pushes true onto the stack if the first is greater than the
     /// second, otherwise pushes false.
-    GreaterThan(Span),
+    GreaterThan,
     /// Takes the top two numbers and pushes true onto the stack if the first is greater than or
     /// equal to the second, otherwise pushes false.
-    GreaterThanOrEqual(Span),
+    GreaterThanOrEqual,
     /// Takes the top two values and pushes true onto the stack if they are equal, otherwise false.
     /// Values of different types are _never_ equal to one another.
-    Equals(Span),
+    Equals,
     /// Takes the top two values and pushes true onto the stack if they are not equal, otherwise
     /// false. Values of different types are _never_ equal to one another.
-    NotEquals(Span),
+    NotEquals,
+    /// Pop the top value from the stack and assign it as a global variable, using the wrapped
+    /// [`Value`] as the identifier.
+    ///
+    /// This operation will overwriting any existing global variable with the same identifier.
+    DefineGlobal(Value),
+    /// Lookup a global variable using the wrapped [`Value`] as the identifier. Pushes the stored
+    /// value onto the stack, or raises an "undefined variable" exception.
+    GetGlobal(Value),
+    /// If a global variable exists whose identifier matches that represented by the wrapped
+    /// [`Value`], replace its value with the top value from the stack, otherwise raise an
+    /// "undefined variable" exception.
+    ///
+    /// This operation does not modify the stack directly - the top value is cloned, not popped.
+    SetGlobal(Value),
 }
 
 impl Display for Op {
@@ -336,20 +379,23 @@ impl Display for Op {
         match self {
             Self::Return => f.write_str("OP_RETURN"),
             Self::Pop => f.write_str("OP_POP"),
-            Self::Print(t) => write!(f, "OP_PRINT ({t})"),
+            Self::Print => f.write_str("OP_PRINT"),
             Self::Constant(v) => write!(f, "OP_CONSTANT {v:?}"),
-            Self::Not(t) => write!(f, "OP_NOT ({t})"),
-            Self::Negate(t) => write!(f, "OP_NEG ({t})"),
-            Self::Add(t) => write!(f, "OP_ADD ({t})"),
-            Self::Subtract(t) => write!(f, "OP_SUB ({t})"),
-            Self::Multiply(t) => write!(f, "OP_MULT ({t})"),
-            Self::Divide(t) => write!(f, "OP_DIV ({t})"),
-            Self::LessThan(t) => write!(f, "OP_LT ({t})"),
-            Self::LessThanOrEqual(t) => write!(f, "OP_LTE ({t})"),
-            Self::GreaterThan(t) => write!(f, "OP_GT ({t})"),
-            Self::GreaterThanOrEqual(t) => write!(f, "OP_GTE ({t})"),
-            Self::Equals(t) => write!(f, "OP_EQ ({t})"),
-            Self::NotEquals(t) => write!(f, "OP_NEQ ({t})"),
+            Self::Not => f.write_str("OP_NOT"),
+            Self::Negate => f.write_str("OP_NEG"),
+            Self::Add => f.write_str("OP_ADD"),
+            Self::Subtract => f.write_str("OP_SUB"),
+            Self::Multiply => f.write_str("OP_MULT"),
+            Self::Divide => f.write_str("OP_DIV"),
+            Self::LessThan => f.write_str("OP_LT"),
+            Self::LessThanOrEqual => f.write_str("OP_LTE"),
+            Self::GreaterThan => f.write_str("OP_GT"),
+            Self::GreaterThanOrEqual => f.write_str("OP_GTE"),
+            Self::Equals => f.write_str("OP_EQ"),
+            Self::NotEquals => f.write_str("OP_NEQ"),
+            Self::DefineGlobal(ident) => write!(f, "OP_DEFG {ident:?}"),
+            Self::GetGlobal(ident) => write!(f, "OP_GETG {ident:?}"),
+            Self::SetGlobal(ident) => write!(f, "OP_SETG {ident:?}"),
         }
     }
 }
@@ -395,7 +441,7 @@ impl Display for Stack {
 
 /// Represents a storable value, which can be moved on and off the [VM](VirtualMachine)'s internal
 /// stack.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Value {
     /// A numerical, floating-point value.
     Number(f64),
@@ -407,6 +453,12 @@ pub enum Value {
     Nil,
     /// An object - value is stored on the heap.
     Obj(Obj),
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Nil
+    }
 }
 
 impl From<f64> for Value {
@@ -424,6 +476,16 @@ impl From<&str> for Value {
 impl From<Rc<str>> for Value {
     fn from(value: Rc<str>) -> Self {
         Self::Obj(Obj::String(value))
+    }
+}
+
+impl Value {
+    unsafe fn into_str(self) -> Rc<str> {
+        if let Self::Obj(Obj::String(s)) = self {
+            s
+        } else {
+            panic!("value is not a string")
+        }
     }
 }
 
@@ -457,6 +519,14 @@ pub enum Obj {
     String(Rc<str>),
 }
 
+impl Clone for Obj {
+    fn clone(&self) -> Self {
+        match self {
+            Self::String(s) => Self::String(Rc::clone(s))
+        }
+    }
+}
+
 impl Debug for Obj {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -485,7 +555,10 @@ pub enum VmError {
     /// the stack has a different type. The first type here is the expected one, the second the
     /// actual type encountered.
     Type(Type, Type),
+    /// An IO error.
     Io(Box<str>),
+    /// An error raised by trying to access an undefined variable.
+    Undefined(Box<str>)
 }
 
 impl From<io::Error> for VmError {
@@ -523,6 +596,7 @@ impl Display for VmError {
                 write!(f, "type error: expected {expected}, got {actual}")
             }
             Self::Io(s) => write!(f, "io error: {s}"),
+            Self::Undefined(s) => write!(f, "undefined variable: {s}")
         }
     }
 }
@@ -531,8 +605,6 @@ impl Error for VmError {}
 
 #[cfg(test)]
 mod test {
-    use crate::scanner::Span;
-
     use super::*;
 
     struct TestWriter {
@@ -563,11 +635,7 @@ mod test {
 
     #[test]
     fn push_and_pop_number() {
-        let instructions = vec![
-            Op::Constant(Value::Number(6.4)),
-            Op::Print(Span::default()),
-            Op::Return,
-        ];
+        let instructions = vec![Op::Constant(Value::Number(6.4)), Op::Print, Op::Return];
 
         let mut test_writer = TestWriter::new();
 
@@ -582,11 +650,11 @@ mod test {
     fn not() {
         let instructions = vec![
             Op::Constant(Value::True),
-            Op::Not(Span::default()),
-            Op::Print(Span::default()),
+            Op::Not,
+            Op::Print,
             Op::Constant(Value::False),
-            Op::Not(Span::default()),
-            Op::Print(Span::default()),
+            Op::Not,
+            Op::Print,
             Op::Return,
         ];
 
@@ -602,8 +670,8 @@ mod test {
     fn not_number() {
         let instructions = vec![
             Op::Constant(Value::Number(1.0)),
-            Op::Not(Span::default()),
-            Op::Print(Span::default()),
+            Op::Not,
+            Op::Print,
             Op::Return,
         ];
 
@@ -618,8 +686,8 @@ mod test {
     fn negate_number() {
         let instructions = vec![
             Op::Constant(Value::Number(1.0)),
-            Op::Negate(Span::default()),
-            Op::Print(Span::default()),
+            Op::Negate,
+            Op::Print,
             Op::Return,
         ];
 
@@ -633,12 +701,7 @@ mod test {
 
     #[test]
     fn negate_bool() {
-        let instructions = vec![
-            Op::Constant(Value::True),
-            Op::Negate(Span::default()),
-            Op::Print(Span::default()),
-            Op::Return,
-        ];
+        let instructions = vec![Op::Constant(Value::True), Op::Negate, Op::Print, Op::Return];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
@@ -652,8 +715,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::Number(8.7)),
-            Op::Add(Span::default()),
-            Op::Print(Span::default()),
+            Op::Add,
+            Op::Print,
             Op::Return,
         ];
 
@@ -670,10 +733,10 @@ mod test {
         let instructions = vec![
             Op::Constant("hello".into()),
             Op::Constant(" ".into()),
-            Op::Add(Span::default()),
+            Op::Add,
             Op::Constant("world".into()),
-            Op::Add(Span::default()),
-            Op::Print(Span::default()),
+            Op::Add,
+            Op::Print,
             Op::Return,
         ];
 
@@ -690,8 +753,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::Add(Span::default()),
-            Op::Print(Span::default()),
+            Op::Add,
+            Op::Print,
             Op::Return,
         ];
 
@@ -707,8 +770,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(5.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::Subtract(Span::default()),
-            Op::Print(Span::default()),
+            Op::Subtract,
+            Op::Print,
             Op::Return,
         ];
 
@@ -725,8 +788,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::Subtract(Span::default()),
-            Op::Print(Span::default()),
+            Op::Subtract,
+            Op::Print,
             Op::Return,
         ];
 
@@ -742,8 +805,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(5.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::Multiply(Span::default()),
-            Op::Print(Span::default()),
+            Op::Multiply,
+            Op::Print,
             Op::Return,
         ];
 
@@ -760,8 +823,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::Multiply(Span::default()),
-            Op::Print(Span::default()),
+            Op::Multiply,
+            Op::Print,
             Op::Return,
         ];
 
@@ -777,8 +840,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::Divide(Span::default()),
-            Op::Print(Span::default()),
+            Op::Divide,
+            Op::Print,
             Op::Return,
         ];
 
@@ -795,8 +858,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::Divide(Span::default()),
-            Op::Print(Span::default()),
+            Op::Divide,
+            Op::Print,
             Op::Return,
         ];
 
@@ -812,16 +875,16 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
-            Op::LessThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThan,
+            Op::Print,
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::LessThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThan,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::LessThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThan,
+            Op::Print,
             Op::Return,
         ];
 
@@ -838,8 +901,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::LessThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThan,
+            Op::Print,
             Op::Return,
         ];
 
@@ -855,16 +918,16 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
-            Op::LessThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThanOrEqual,
+            Op::Print,
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::LessThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThanOrEqual,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::LessThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThanOrEqual,
+            Op::Print,
             Op::Return,
         ];
 
@@ -881,8 +944,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::LessThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::LessThanOrEqual,
+            Op::Print,
             Op::Return,
         ];
 
@@ -898,16 +961,16 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
-            Op::GreaterThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThan,
+            Op::Print,
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::GreaterThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThan,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::GreaterThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThan,
+            Op::Print,
             Op::Return,
         ];
 
@@ -924,8 +987,8 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::GreaterThan(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThan,
+            Op::Print,
             Op::Return,
         ];
 
@@ -941,16 +1004,16 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(2.0)),
-            Op::GreaterThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThanOrEqual,
+            Op::Print,
             Op::Constant(Value::Number(20.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::GreaterThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThanOrEqual,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::GreaterThanOrEqual(Span::default()),
-            Op::Print(Span::default()),
+            Op::GreaterThanOrEqual,
+            Op::Print,
             Op::Return,
         ];
 
@@ -967,7 +1030,7 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
-            Op::GreaterThanOrEqual(Span::default()),
+            Op::GreaterThanOrEqual,
             Op::Return,
         ];
 
@@ -983,32 +1046,32 @@ mod test {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant(Value::True),
             Op::Constant(Value::True),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant(Value::False),
             Op::Constant(Value::False),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant(Value::True),
             Op::Constant(Value::False),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant("hello".into()),
             Op::Constant("hello".into()),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Constant("hello".into()),
             Op::Constant("world".into()),
-            Op::Equals(Span::default()),
-            Op::Print(Span::default()),
+            Op::Equals,
+            Op::Print,
             Op::Return,
         ];
 
@@ -1022,39 +1085,64 @@ mod test {
             "true\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\n"
         );
     }
-    
+
     #[test]
     fn not_equals() {
         let instructions = vec![
             Op::Constant(Value::Number(4.0)),
             Op::Constant(Value::Number(4.0)),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant(Value::Number(2.0)),
             Op::Constant(Value::Number(20.0)),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant(Value::True),
             Op::Constant(Value::True),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant(Value::False),
             Op::Constant(Value::False),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant(Value::True),
             Op::Constant(Value::False),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant("hello".into()),
             Op::Constant("hello".into()),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
+            Op::NotEquals,
+            Op::Print,
             Op::Constant("hello".into()),
             Op::Constant("world".into()),
-            Op::NotEquals(Span::default()),
-            Op::Print(Span::default()),
-            Op::Return
+            Op::NotEquals,
+            Op::Print,
+            Op::Return,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(
+            test_writer.to_string(),
+            "false\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
+        );
+    }
+    
+    #[test]
+    fn global_variables_declar_and_access() {
+        let instructions = vec![
+            Op::Constant(7.0.into()),
+            Op::DefineGlobal("x".into()),
+            Op::Constant(3.0.into()),
+            Op::DefineGlobal("y".into()),
+            Op::GetGlobal("x".into()),
+            Op::GetGlobal("y".into()),
+            Op::Add,
+            Op::Print,
+            Op::Return,
         ];
     
         let mut test_writer = TestWriter::new();
@@ -1062,9 +1150,75 @@ mod test {
         vm.load(instructions);
     
         assert_eq!(vm.exec(), Ok(()));
-        assert_eq!(
-            test_writer.to_string(),
-            "false\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
-        );
+        assert_eq!(test_writer.to_string(), "10\n");
+    }
+    
+    #[test]
+    fn global_variables_overwrite_declaration() {
+        let instructions = vec![
+            Op::Constant(7.0.into()),
+            Op::DefineGlobal("x".into()),
+            Op::Constant(3.0.into()),
+            Op::DefineGlobal("x".into()),
+            Op::GetGlobal("x".into()),
+            Op::Print,
+            Op::Return,
+        ];
+    
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+    
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "3\n");
+    }
+
+    #[test]
+    fn assign_to_global() {
+        let instructions = vec![
+            Op::Constant(7.0.into()),
+            Op::DefineGlobal("x".into()),
+            Op::Constant(3.0.into()),
+            Op::SetGlobal("x".into()),
+            Op::Print,
+            Op::Return,
+        ];
+    
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+    
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "3\n");
+    }
+
+    #[test]
+    fn assign_to_undefined_global() {
+        let instructions = vec![
+            Op::SetGlobal("x".into()),
+            Op::Print,
+            Op::Return,
+        ];
+    
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+    
+        assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
+    }
+
+    #[test]
+    fn access_undefined_global() {
+        let instructions = vec![
+            Op::SetGlobal("x".into()),
+            Op::Print,
+            Op::Return,
+        ];
+    
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+    
+        assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
     }
 }

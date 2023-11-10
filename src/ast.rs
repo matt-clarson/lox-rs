@@ -3,14 +3,15 @@ use crate::scanner::Span;
 /// A complete statement of the language - this is the highest type of node in the AST.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Declaration {
-    Var{name: Span, expr: Expression},
-    Stmt(Statement)
+    Var { name: Span, expr: Expression },
+    Stmt(Statement),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Statement {
     Print(Expression),
-    Expr(Expression)
+    Block(Box<[Declaration]>),
+    Expr(Expression),
 }
 
 impl From<Statement> for Declaration {
@@ -28,7 +29,7 @@ impl From<Expression> for Declaration {
 /// A single expression.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Expression {
-    Assignment{ident: Span, expr: Box<Expression>},
+    Assignment { ident: Span, expr: Box<Expression> },
     Equality(Equality),
     Comparison(Comparison),
     Term(Term),
@@ -40,31 +41,61 @@ pub enum Expression {
 /// An equality expression (e.g. x == y)
 #[derive(Debug, Eq, PartialEq)]
 pub enum Equality {
-    Equals{left: Box<Expression>, right: Box<Expression>},
-    NotEquals{left: Box<Expression>, right: Box<Expression>},
+    Equals {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    NotEquals {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
 }
 
 /// A comparison expression (e.g. x < y)
 #[derive(Debug, Eq, PartialEq)]
 pub enum Comparison {
-    LessThan{left: Box<Expression>, right: Box<Expression>},
-    LessThanOrEquals{left: Box<Expression>, right: Box<Expression>},
-    GreaterThan{left: Box<Expression>, right: Box<Expression>},
-    GreaterThanOrEquals{left: Box<Expression>, right: Box<Expression>},
+    LessThan {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    LessThanOrEquals {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    GreaterThan {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    GreaterThanOrEquals {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
 }
 
 /// A term expression (e.g. x + y)
 #[derive(Debug, Eq, PartialEq)]
 pub enum Term {
-    Plus{left: Box<Expression>, right: Box<Expression>},
-    Minus{left: Box<Expression>, right: Box<Expression>},
+    Plus {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    Minus {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
 }
 
 /// A factor expression (e.g. x / y)
 #[derive(Debug, Eq, PartialEq)]
 pub enum Factor {
-    Multiply{left: Box<Expression>, right: Box<Expression>},
-    Divide{left: Box<Expression>, right: Box<Expression>},
+    Multiply {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    Divide {
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
 }
 
 /// A unary expression (e.g. !y)

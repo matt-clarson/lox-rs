@@ -1,4 +1,4 @@
-use std::{error::Error, vec::IntoIter, io};
+use std::{error::Error, io, vec::IntoIter};
 
 use rustyline::{error::ReadlineError, DefaultEditor};
 

@@ -65,6 +65,21 @@ impl<'s> Parser<'s> {
                 let stmt = Declaration::Stmt(Statement::Print(self.expression()?));
                 self.take_semicolon().and(Ok(stmt))
             }
+            Token::LeftBrace(_) => {
+                self.advance()?;
+                let mut contents: Vec<Declaration> = vec![];
+                loop {
+                    match self.current()? {
+                        Token::RightBrace(_) => {
+                            let stmt = Declaration::Stmt(Statement::Block(contents.into()));
+                            return self.advance().and(Ok(stmt));
+                        }
+                        _ => {
+                            contents.push(self.declaration()?);
+                        }
+                    }
+                }
+            }
             _ => {
                 let stmt = Declaration::Stmt(Statement::Expr(self.expression()?));
                 self.take_semicolon().and(Ok(stmt))
@@ -1060,6 +1075,68 @@ mod test {
                     })
                 }
             ))))
+        );
+    }
+
+    #[test]
+    fn parse_block() {
+        let s = "
+{
+    var x = 1;
+    print x * 2;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Block(
+                vec![
+                    Declaration::Var {
+                        name: Span {
+                            start: 10,
+                            length: 1,
+                            line: 2,
+                        },
+                        expr: Expression::Primary(Primary::Number(Span {
+                            start: 14,
+                            length: 1,
+                            line: 2,
+                        }))
+                    },
+                    Declaration::Stmt(Statement::Print(Expression::Factor(Factor::Multiply {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 27,
+                            length: 1,
+                            line: 3
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 31,
+                            length: 1,
+                            line: 3
+                        })))
+                    })))
+                ]
+                .into()
+            ))))
+        );
+    }
+
+    #[test]
+    fn parse_empty_block() {
+        let s = "{}";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Block(vec![].into()))))
         );
     }
 }

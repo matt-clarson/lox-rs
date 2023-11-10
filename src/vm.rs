@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, HashMap},
+    collections::{HashMap, HashSet},
     error::Error,
     fmt::{Debug, Display},
     io::{self, Write},
@@ -138,6 +138,10 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
             Op::Return => Ok(Some(())),
             Op::Pop => self.stack.pop().ok_or(VmError::NoValue).and(Ok(None)),
+            Op::PopN(n) => {
+                self.stack.popn(n);
+                Ok(None)
+            }
             Op::Print => {
                 let v = self.stack.pop().ok_or(VmError::NoValue)?;
                 if self.debug {
@@ -148,13 +152,13 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Ok(None)
             }
             Op::DefineGlobal(ident) => {
-                let interned = unsafe {self.intern_string(ident.into_str())};
+                let interned = unsafe { self.intern_string(ident.into_str()) };
                 let value = self.pop_value()?;
                 self.globals.insert(interned, value);
                 Ok(None)
             }
             Op::GetGlobal(ident) => {
-                let s = unsafe {ident.into_str()};
+                let s = unsafe { ident.into_str() };
                 if let Some(value) = self.globals.get(&s) {
                     self.push_value(value.clone())
                 } else {
@@ -162,14 +166,23 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 }
             }
             Op::SetGlobal(ident) => {
-                let s = unsafe {ident.into_str()};
+                let s = unsafe { ident.into_str() };
                 if self.globals.get(&s).is_none() {
-                    return Err(VmError::Undefined(s.as_ref().into()))
+                    return Err(VmError::Undefined(s.as_ref().into()));
                 }
                 let new_value = self.clone_value()?;
                 self.globals.insert(s, new_value);
                 Ok(None)
             }
+            Op::GetLocal(idx) => {
+                self.stack.copy_to_top(idx);
+                Ok(None)
+            }
+            Op::SetLocal(idx) => {
+                let value = self.pop_value()?;
+                self.stack.insert(idx, value);
+                Ok(None)
+            },
         }
     }
 
@@ -277,10 +290,10 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
         }
     }
 
-    fn clone_value(&mut self) -> Result<Value,VmError> {
+    fn clone_value(&mut self) -> Result<Value, VmError> {
         match self.stack.peek() {
             Some(v) => Ok(v.clone()),
-            None => Err(VmError::NoValue)
+            None => Err(VmError::NoValue),
         }
     }
 
@@ -324,6 +337,8 @@ pub enum Op {
     Return,
     /// Pops the top value from the stack and discards it.
     Pop,
+    /// Pops the top n values from the top of the stack and discards them.
+    PopN(usize),
     /// Pops the top value from the stack and sends it to stdout.
     Print,
     /// Pushes the wrapped [`Value`] onto the stack.
@@ -372,6 +387,8 @@ pub enum Op {
     ///
     /// This operation does not modify the stack directly - the top value is cloned, not popped.
     SetGlobal(Value),
+    GetLocal(usize),
+    SetLocal(usize),
 }
 
 impl Display for Op {
@@ -379,6 +396,7 @@ impl Display for Op {
         match self {
             Self::Return => f.write_str("OP_RETURN"),
             Self::Pop => f.write_str("OP_POP"),
+            Self::PopN(n) => write!(f, "OP_POPN {n}"),
             Self::Print => f.write_str("OP_PRINT"),
             Self::Constant(v) => write!(f, "OP_CONSTANT {v:?}"),
             Self::Not => f.write_str("OP_NOT"),
@@ -396,6 +414,8 @@ impl Display for Op {
             Self::DefineGlobal(ident) => write!(f, "OP_DEFG {ident:?}"),
             Self::GetGlobal(ident) => write!(f, "OP_GETG {ident:?}"),
             Self::SetGlobal(ident) => write!(f, "OP_SETG {ident:?}"),
+            Self::GetLocal(idx) => write!(f, "OP_SETL {idx}"),
+            Self::SetLocal(idx) => write!(f, "OP_SETL {idx}"),
         }
     }
 }
@@ -417,6 +437,10 @@ impl Stack {
         self.values.pop()
     }
 
+    fn popn(&mut self, n: usize) {
+        self.values.truncate(self.values.len() - n);
+    }
+
     fn peek_mut(&mut self) -> Option<&mut Value> {
         self.values.last_mut()
     }
@@ -427,6 +451,24 @@ impl Stack {
 
     fn size(&self) -> usize {
         self.values.len()
+    }
+
+    fn copy_to_top(&mut self, idx: usize) -> bool {
+        if let Some(v) = self.values.get(idx) {
+            self.values.push(v.clone());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn insert(&mut self, idx: usize, value: Value) -> bool {
+        if let Some(v) = self.values.get_mut(idx) {
+            let _ = mem::replace(v, value);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -522,7 +564,7 @@ pub enum Obj {
 impl Clone for Obj {
     fn clone(&self) -> Self {
         match self {
-            Self::String(s) => Self::String(Rc::clone(s))
+            Self::String(s) => Self::String(Rc::clone(s)),
         }
     }
 }
@@ -558,7 +600,7 @@ pub enum VmError {
     /// An IO error.
     Io(Box<str>),
     /// An error raised by trying to access an undefined variable.
-    Undefined(Box<str>)
+    Undefined(Box<str>),
 }
 
 impl From<io::Error> for VmError {
@@ -596,7 +638,7 @@ impl Display for VmError {
                 write!(f, "type error: expected {expected}, got {actual}")
             }
             Self::Io(s) => write!(f, "io error: {s}"),
-            Self::Undefined(s) => write!(f, "undefined variable: {s}")
+            Self::Undefined(s) => write!(f, "undefined variable: {s}"),
         }
     }
 }
@@ -1130,9 +1172,9 @@ mod test {
             "false\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
         );
     }
-    
+
     #[test]
-    fn global_variables_declar_and_access() {
+    fn global_variables_declare_and_access() {
         let instructions = vec![
             Op::Constant(7.0.into()),
             Op::DefineGlobal("x".into()),
@@ -1144,15 +1186,15 @@ mod test {
             Op::Print,
             Op::Return,
         ];
-    
+
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-    
+
         assert_eq!(vm.exec(), Ok(()));
         assert_eq!(test_writer.to_string(), "10\n");
     }
-    
+
     #[test]
     fn global_variables_overwrite_declaration() {
         let instructions = vec![
@@ -1164,11 +1206,11 @@ mod test {
             Op::Print,
             Op::Return,
         ];
-    
+
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-    
+
         assert_eq!(vm.exec(), Ok(()));
         assert_eq!(test_writer.to_string(), "3\n");
     }
@@ -1183,42 +1225,75 @@ mod test {
             Op::Print,
             Op::Return,
         ];
-    
+
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-    
+
         assert_eq!(vm.exec(), Ok(()));
         assert_eq!(test_writer.to_string(), "3\n");
     }
 
     #[test]
     fn assign_to_undefined_global() {
-        let instructions = vec![
-            Op::SetGlobal("x".into()),
-            Op::Print,
-            Op::Return,
-        ];
-    
+        let instructions = vec![Op::SetGlobal("x".into()), Op::Print, Op::Return];
+
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-    
+
         assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
     }
 
     #[test]
     fn access_undefined_global() {
-        let instructions = vec![
-            Op::SetGlobal("x".into()),
-            Op::Print,
-            Op::Return,
-        ];
-    
+        let instructions = vec![Op::SetGlobal("x".into()), Op::Print, Op::Return];
+
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
         vm.load(instructions);
-    
+
         assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
+    }
+
+    #[test]
+    fn local_variables_declare_and_access() {
+        let instructions = vec![
+            Op::Constant(7.0.into()),
+            Op::Constant(3.0.into()),
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::Add,
+            Op::Print,
+            Op::PopN(2),
+            Op::Return,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "10\n");
+    }
+
+    #[test]
+    fn assign_to_local() {
+        let instructions = vec![
+            Op::Constant(7.0.into()),
+            Op::Constant(3.0.into()),
+            Op::SetLocal(0),
+            Op::GetLocal(0),
+            Op::Print,
+            Op::PopN(1),
+            Op::Return,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+        vm.load(instructions);
+
+        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(test_writer.to_string(), "3\n");
     }
 }

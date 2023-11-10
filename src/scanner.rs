@@ -375,7 +375,7 @@ impl Span {
         Self {
             start: self.start + 1,
             length: self.length - 2,
-            line: self.line
+            line: self.line,
         }
     }
 }

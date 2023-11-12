@@ -7,6 +7,8 @@ use std::{
     rc::Rc,
 };
 
+use crate::compiler::{Chunk, ChunkIter};
+
 /// Stack-based VM for executing compiled Lox bytecode.
 ///
 ///See the [crate docs](crate) for docs on using the VM with a compiler.
@@ -27,70 +29,79 @@ use std::{
 ///     Op::Constant(Value::Number(8.7)),
 ///     Op::Add,
 ///     Op::Print,
-///     Op::Return,
 /// ];
 ///
 /// let mut buf: Vec<u8> = vec![];
 /// let mut vm = VirtualMachine::new(&mut buf);
-/// vm.load(instructions);
 ///
-/// assert_eq!(vm.exec(), Ok(()));
+///
+/// assert_eq!(vm.exec(instructions.into()), Ok(()));
 /// assert_eq!(String::from_utf8(buf), Ok(String::from("10\n")));
 /// ```
-pub struct VirtualMachine<I: Iterator<Item = Op>, W: Write> {
+pub struct VirtualMachine<W: Write> {
     stdout: W,
-    ops: Option<I>,
     stack: Stack,
+    call_stack: Vec<CallFrame>,
     globals: HashMap<Rc<str>, Value>,
     strings: HashSet<Rc<str>>,
     debug: bool,
 }
 
-impl<I: Iterator<Item = Op>> Default for VirtualMachine<I, io::Stdout> {
+impl Default for VirtualMachine<io::Stdout> {
     fn default() -> Self {
         Self::new(io::stdout())
     }
 }
 
-impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
+impl<W: Write> VirtualMachine<W> {
     pub fn new(stdout: W) -> Self {
         Self {
             stdout,
-            ops: None,
             stack: Stack::new(),
+            call_stack: Vec::new(),
             globals: HashMap::new(),
             strings: HashSet::new(),
             debug: false,
         }
     }
 
-    /// Loads a new set of operations into the VM.
-    pub fn load<T: IntoIterator<IntoIter = I>>(&mut self, ops: T) {
-        self.ops = Some(ops.into_iter());
+    /// Return the current call stack - useful to provide context on runtime errors.
+    pub fn call_stack(&self) -> Box<[&str]> {
+        self.call_stack
+            .iter()
+            .map(|f| f.name.as_ref())
+            .collect::<Vec<&str>>()
+            .into()
     }
 
     /// Execute the currently loaded operations.
-    pub fn exec(&mut self) -> Result<(), VmError> {
-        while let Some(op) = self.ops.as_mut().and_then(Iterator::next) {
+    pub fn exec(&mut self, chunk: Chunk) -> Result<(), VmError> {
+        let ops = chunk.iter();
+        self.exec_ops(ops)?;
+        Ok(())
+    }
+
+    fn exec_ops(&mut self, ops: ChunkIter<'_>) -> Result<Value, VmError> {
+        for op in ops {
             if self.debug {
-                self.print_debug(&op);
+                self.print_debug(op);
             }
 
             let r = self.process_op(op);
 
-            if let Ok(Some(_)) = r {
-                return Ok(());
+            if let Ok(Some(value)) = r {
+                return Ok(value);
             } else if let Err(err) = r {
                 return Err(err);
             }
         }
 
-        Ok(())
+        Ok(Value::Nil)
     }
 
-    fn process_op(&mut self, op: Op) -> Result<Option<()>, VmError> {
+    fn process_op(&mut self, op: &Op) -> Result<Option<Value>, VmError> {
         match op {
-            Op::Constant(value) => self.push_value(value),
+            Op::Constant(value) => self.push_value(value.clone()),
             Op::Not => match self.stack.peek_mut() {
                 Some(v @ Value::True) => {
                     let _ = mem::replace(v, Value::False);
@@ -103,6 +114,9 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Some(Value::Number(_)) => Err(VmError::Type(Type::Bool, Type::Number)),
                 Some(Value::Nil) => Err(VmError::Type(Type::Bool, Type::Nil)),
                 Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Bool, Type::String)),
+                Some(Value::Obj(Obj::Function(_))) => {
+                    Err(VmError::Type(Type::Bool, Type::Function))
+                }
                 None => Err(VmError::NoValue),
             },
             Op::Negate => self.modify_number(|n| -n),
@@ -113,6 +127,9 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 }
                 Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
                 Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
+                Some(Value::Obj(Obj::Function(_))) => {
+                    Err(VmError::Type(Type::Number, Type::Function))
+                }
                 None => Err(VmError::NoValue),
             },
             Op::Subtract => self.binary_op_number(|a, b| a - b),
@@ -136,10 +153,11 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
             Op::NotEquals => self
                 .pop_two_values()
                 .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
-            Op::Return => Ok(Some(())),
+            Op::Return => self.pop_value().map(Some),
+            Op::VoidReturn => Ok(Some(Value::Nil)),
             Op::Pop => self.stack.pop().ok_or(VmError::NoValue).and(Ok(None)),
             Op::PopN(n) => {
-                self.stack.popn(n);
+                self.stack.popn(*n);
                 Ok(None)
             }
             Op::Print => {
@@ -152,13 +170,13 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Ok(None)
             }
             Op::DefineGlobal(ident) => {
-                let interned = unsafe { self.intern_string(ident.into_str()) };
+                let interned = unsafe { self.intern_string(ident.as_ref_str()) };
                 let value = self.pop_value()?;
                 self.globals.insert(interned, value);
                 Ok(None)
             }
             Op::GetGlobal(ident) => {
-                let s = unsafe { ident.into_str() };
+                let s = unsafe { ident.as_ref_str() };
                 if let Some(value) = self.globals.get(&s) {
                     self.push_value(value.clone())
                 } else {
@@ -166,7 +184,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 }
             }
             Op::SetGlobal(ident) => {
-                let s = unsafe { ident.into_str() };
+                let s = unsafe { ident.as_ref_str() };
                 if self.globals.get(&s).is_none() {
                     return Err(VmError::Undefined(s.as_ref().into()));
                 }
@@ -175,14 +193,51 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
                 Ok(None)
             }
             Op::GetLocal(idx) => {
-                self.stack.copy_to_top(idx);
+                let pos = self.stack_pos(*idx);
+                self.stack.copy_to_top(pos);
                 Ok(None)
             }
             Op::SetLocal(idx) => {
                 let value = self.pop_value()?;
-                self.stack.insert(idx, value);
+                let pos = self.stack_pos(*idx);
+                self.stack.insert(pos, value);
                 Ok(None)
-            },
+            }
+            Op::Call(n) => {
+                let function = self.pop_function()?;
+
+                if n != &function.arity {
+                    return Err(VmError::WrongNumArgs {
+                        name: function.name.as_ref().into(),
+                        expected: function.arity,
+                        actual: *n
+                    });
+                }
+
+                let offset = self.stack.size() - function.arity as usize;
+                let call_frame = CallFrame {
+                    name: Rc::clone(&function.name),
+                    offset,
+                };
+
+                self.call_stack.push(call_frame);
+
+                let return_value = self.exec_ops(function.ops())?;
+
+                self.call_stack.pop();
+
+                self.stack.truncate(offset);
+
+                self.push_value(return_value)
+            }
+        }
+    }
+
+    fn stack_pos(&self, pos: usize) -> usize {
+        if let Some(call_frame) = self.call_stack.last() {
+            call_frame.offset + pos
+        } else {
+            pos
         }
     }
 
@@ -211,7 +266,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
         }
     }
 
-    fn push_value(&mut self, value: Value) -> Result<Option<()>, VmError> {
+    fn push_value(&mut self, value: Value) -> Result<Option<Value>, VmError> {
         match value {
             Value::Obj(Obj::String(s)) => self.push_string(s),
             v => {
@@ -221,13 +276,13 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
         }
     }
 
-    fn push_string(&mut self, s: Rc<str>) -> Result<Option<()>, VmError> {
+    fn push_string(&mut self, s: Rc<str>) -> Result<Option<Value>, VmError> {
         let interned = self.intern_string(s);
         self.stack.push(interned.into());
         Ok(None)
     }
 
-    fn push_bool(&mut self, b: bool) -> Result<Option<()>, VmError> {
+    fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
         self.stack.push(if b { Value::True } else { Value::False });
         Ok(None)
     }
@@ -235,7 +290,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
     fn binary_op_number<F: FnOnce(f64, f64) -> f64>(
         &mut self,
         f: F,
-    ) -> Result<Option<()>, VmError> {
+    ) -> Result<Option<Value>, VmError> {
         self.pop_number()
             .and_then(|a| self.modify_number(|b| f(b, a)))
     }
@@ -243,7 +298,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
     fn binary_op_string<F: FnOnce(&str, &str) -> Rc<str>>(
         &mut self,
         f: F,
-    ) -> Result<Option<()>, VmError> {
+    ) -> Result<Option<Value>, VmError> {
         self.pop_two_strings()
             .and_then(|(a, b)| self.push_string(f(&a, &b)))
     }
@@ -269,6 +324,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
             Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Number, Type::String)),
+            Some(Value::Obj(Obj::Function(_))) => Err(VmError::Type(Type::Number, Type::Function)),
             None => Err(VmError::NoValue),
         }
     }
@@ -276,9 +332,21 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
     fn pop_string(&mut self) -> Result<Rc<str>, VmError> {
         match self.stack.pop() {
             Some(Value::Obj(Obj::String(s))) => Ok(s),
+            Some(Value::Obj(Obj::Function(_))) => Err(VmError::Type(Type::String, Type::Function)),
             Some(Value::True | Value::False) => Err(VmError::Type(Type::String, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::String, Type::Nil)),
             Some(Value::Number(_)) => Err(VmError::Type(Type::String, Type::Number)),
+            None => Err(VmError::NoValue),
+        }
+    }
+
+    fn pop_function(&mut self) -> Result<Function, VmError> {
+        match self.stack.pop() {
+            Some(Value::Obj(Obj::Function(function))) => Ok(function),
+            Some(Value::Obj(Obj::String(_))) => Err(VmError::NotCallable(Type::String)),
+            Some(Value::True | Value::False) => Err(VmError::NotCallable(Type::Bool)),
+            Some(Value::Nil) => Err(VmError::NotCallable(Type::Nil)),
+            Some(Value::Number(_)) => Err(VmError::NotCallable(Type::Number)),
             None => Err(VmError::NoValue),
         }
     }
@@ -297,7 +365,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
         }
     }
 
-    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<()>, VmError> {
+    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<Value>, VmError> {
         match self.stack.peek_mut() {
             Some(Value::Number(n)) => {
                 let _ = mem::replace(n, f(*n));
@@ -306,6 +374,7 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
             Some(Value::Obj(Obj::String(_))) => Err(VmError::Type(Type::Number, Type::String)),
+            Some(Value::Obj(Obj::Function(_))) => Err(VmError::Type(Type::Number, Type::Function)),
             None => Err(VmError::NoValue),
         }
     }
@@ -330,11 +399,18 @@ impl<I: Iterator<Item = Op>, W: Write> VirtualMachine<I, W> {
     }
 }
 
+struct CallFrame {
+    name: Rc<str>,
+    offset: usize,
+}
+
 /// Bytecode operations used by the [VM](VirtualMachine).
 #[derive(Debug, PartialEq)]
 pub enum Op {
     /// Pops the top value from the stack to be returned to the caller.
     Return,
+    /// Returns nil to the caller. Does not interact with the stack.
+    VoidReturn,
     /// Pops the top value from the stack and discards it.
     Pop,
     /// Pops the top n values from the top of the stack and discards them.
@@ -387,14 +463,20 @@ pub enum Op {
     ///
     /// This operation does not modify the stack directly - the top value is cloned, not popped.
     SetGlobal(Value),
+    /// Access a local variable by index in the VM stack.
     GetLocal(usize),
+    /// Pop the top value off the stack, and replace local variable at the given index with the
+    /// popped value.
     SetLocal(usize),
+    /// Pop the top value off the stack, then call it, creating a new call frame. Errors of the value is not a Function. The wrapped number is the number of args provided by the invoker, used to ensure the same number of args as params are provided.
+    Call(u8),
 }
 
 impl Display for Op {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Return => f.write_str("OP_RETURN"),
+            Self::VoidReturn => f.write_str("OP_VOID_RETURN"),
             Self::Pop => f.write_str("OP_POP"),
             Self::PopN(n) => write!(f, "OP_POPN {n}"),
             Self::Print => f.write_str("OP_PRINT"),
@@ -414,8 +496,9 @@ impl Display for Op {
             Self::DefineGlobal(ident) => write!(f, "OP_DEFG {ident:?}"),
             Self::GetGlobal(ident) => write!(f, "OP_GETG {ident:?}"),
             Self::SetGlobal(ident) => write!(f, "OP_SETG {ident:?}"),
-            Self::GetLocal(idx) => write!(f, "OP_SETL {idx}"),
+            Self::GetLocal(idx) => write!(f, "OP_GETL {idx}"),
             Self::SetLocal(idx) => write!(f, "OP_SETL {idx}"),
+            Self::Call(n) => write!(f, "OP_CALL {n}"),
         }
     }
 }
@@ -439,6 +522,10 @@ impl Stack {
 
     fn popn(&mut self, n: usize) {
         self.values.truncate(self.values.len() - n);
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.values.truncate(len);
     }
 
     fn peek_mut(&mut self) -> Option<&mut Value> {
@@ -521,10 +608,16 @@ impl From<Rc<str>> for Value {
     }
 }
 
+impl From<Function> for Value {
+    fn from(value: Function) -> Self {
+        Self::Obj(Obj::Function(value))
+    }
+}
+
 impl Value {
-    unsafe fn into_str(self) -> Rc<str> {
+    unsafe fn as_ref_str(&self) -> Rc<str> {
         if let Self::Obj(Obj::String(s)) = self {
-            s
+            Rc::clone(s)
         } else {
             panic!("value is not a string")
         }
@@ -559,12 +652,14 @@ impl Display for Value {
 #[derive(PartialEq)]
 pub enum Obj {
     String(Rc<str>),
+    Function(Function),
 }
 
 impl Clone for Obj {
     fn clone(&self) -> Self {
         match self {
             Self::String(s) => Self::String(Rc::clone(s)),
+            Self::Function(f) => Self::Function(f.clone()),
         }
     }
 }
@@ -573,6 +668,7 @@ impl Debug for Obj {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::String(s) => write!(f, "STR  \"{s}\""),
+            Self::Function(fun) => write!(f, "FUN  {fun:?}"),
         }
     }
 }
@@ -581,7 +677,41 @@ impl Display for Obj {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::String(s) => write!(f, "\"{s}\""),
+            Self::Function(fun) => write!(f, "{fun}"),
         }
+    }
+}
+
+/// Represents a function, as a first-class entity.
+#[derive(Debug, PartialEq)]
+pub struct Function {
+    /// Function name for debugging.
+    pub name: Rc<str>,
+    /// Required number of arguments.
+    pub arity: u8,
+    /// Function code.
+    pub chunk: Rc<[Op]>,
+}
+
+impl Function {
+    fn ops(&self) -> ChunkIter<'_> {
+        ChunkIter::new(&self.chunk)
+    }
+}
+
+impl Clone for Function {
+    fn clone(&self) -> Self {
+        Self {
+            name: Rc::clone(&self.name),
+            arity: self.arity,
+            chunk: Rc::clone(&self.chunk),
+        }
+    }
+}
+
+impl Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{}()>", self.name)
     }
 }
 
@@ -601,6 +731,14 @@ pub enum VmError {
     Io(Box<str>),
     /// An error raised by trying to access an undefined variable.
     Undefined(Box<str>),
+    /// Raised if trying to call a non-function type.
+    NotCallable(Type),
+    /// Raised when calling a function with wrong number of arguments.
+    WrongNumArgs {
+        name: Box<str>,
+        expected: u8,
+        actual: u8
+    },
 }
 
 impl From<io::Error> for VmError {
@@ -616,6 +754,7 @@ pub enum Type {
     Bool,
     Nil,
     String,
+    Function,
 }
 
 impl Display for Type {
@@ -625,6 +764,7 @@ impl Display for Type {
             Self::Bool => f.write_str("boolean"),
             Self::Nil => f.write_str("nil"),
             Self::String => f.write_str("string"),
+            Self::Function => f.write_str("function"),
         }
     }
 }
@@ -639,6 +779,10 @@ impl Display for VmError {
             }
             Self::Io(s) => write!(f, "io error: {s}"),
             Self::Undefined(s) => write!(f, "undefined variable: {s}"),
+            Self::NotCallable(t) => write!(f, "not callable: value of type {t} is not callable"),
+            Self::WrongNumArgs { name, expected, actual } => {
+                write!(f, "wrong number of args: function {name} needs {expected} args, {actual} were provided")
+            }
         }
     }
 }
@@ -677,14 +821,13 @@ mod test {
 
     #[test]
     fn push_and_pop_number() {
-        let instructions = vec![Op::Constant(Value::Number(6.4)), Op::Print, Op::Return];
+        let instructions = vec![Op::Constant(Value::Number(6.4)), Op::Print];
 
         let mut test_writer = TestWriter::new();
 
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "6.4\n");
     }
 
@@ -697,59 +840,50 @@ mod test {
             Op::Constant(Value::False),
             Op::Not,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "false\ntrue\n");
     }
 
     #[test]
     fn not_number() {
-        let instructions = vec![
-            Op::Constant(Value::Number(1.0)),
-            Op::Not,
-            Op::Print,
-            Op::Return,
-        ];
+        let instructions = vec![Op::Constant(Value::Number(1.0)), Op::Not, Op::Print];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Bool, Type::Number)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Bool, Type::Number))
+        );
     }
 
     #[test]
     fn negate_number() {
-        let instructions = vec![
-            Op::Constant(Value::Number(1.0)),
-            Op::Negate,
-            Op::Print,
-            Op::Return,
-        ];
+        let instructions = vec![Op::Constant(Value::Number(1.0)), Op::Negate, Op::Print];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "-1\n");
     }
 
     #[test]
     fn negate_bool() {
-        let instructions = vec![Op::Constant(Value::True), Op::Negate, Op::Print, Op::Return];
+        let instructions = vec![Op::Constant(Value::True), Op::Negate, Op::Print];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -759,14 +893,12 @@ mod test {
             Op::Constant(Value::Number(8.7)),
             Op::Add,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "10\n");
     }
 
@@ -779,14 +911,12 @@ mod test {
             Op::Constant("world".into()),
             Op::Add,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "\"hello world\"\n");
     }
 
@@ -797,14 +927,15 @@ mod test {
             Op::Constant(Value::True),
             Op::Add,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -814,14 +945,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Subtract,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "1\n");
     }
 
@@ -832,14 +961,15 @@ mod test {
             Op::Constant(Value::True),
             Op::Subtract,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -849,14 +979,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Multiply,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "20\n");
     }
 
@@ -867,14 +995,15 @@ mod test {
             Op::Constant(Value::True),
             Op::Multiply,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -884,14 +1013,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::Divide,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "5\n");
     }
 
@@ -902,14 +1029,15 @@ mod test {
             Op::Constant(Value::True),
             Op::Divide,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -927,14 +1055,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::LessThan,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "false\nfalse\ntrue\n");
     }
 
@@ -945,14 +1071,15 @@ mod test {
             Op::Constant(Value::True),
             Op::LessThan,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -970,14 +1097,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::LessThanOrEqual,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "false\ntrue\ntrue\n");
     }
 
@@ -988,14 +1113,15 @@ mod test {
             Op::Constant(Value::True),
             Op::LessThanOrEqual,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -1013,14 +1139,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::GreaterThan,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "true\nfalse\nfalse\n");
     }
 
@@ -1031,14 +1155,15 @@ mod test {
             Op::Constant(Value::True),
             Op::GreaterThan,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -1056,14 +1181,12 @@ mod test {
             Op::Constant(Value::Number(4.0)),
             Op::GreaterThanOrEqual,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "true\ntrue\nfalse\n");
     }
 
@@ -1073,14 +1196,15 @@ mod test {
             Op::Constant(Value::Number(1.3)),
             Op::Constant(Value::True),
             Op::GreaterThanOrEqual,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Type(Type::Number, Type::Bool)));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::Bool))
+        );
     }
 
     #[test]
@@ -1114,14 +1238,12 @@ mod test {
             Op::Constant("world".into()),
             Op::Equals,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(
             test_writer.to_string(),
             "true\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\n"
@@ -1159,14 +1281,12 @@ mod test {
             Op::Constant("world".into()),
             Op::NotEquals,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(
             test_writer.to_string(),
             "false\ntrue\nfalse\nfalse\ntrue\nfalse\ntrue\n"
@@ -1184,14 +1304,12 @@ mod test {
             Op::GetGlobal("y".into()),
             Op::Add,
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "10\n");
     }
 
@@ -1204,14 +1322,12 @@ mod test {
             Op::DefineGlobal("x".into()),
             Op::GetGlobal("x".into()),
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "3\n");
     }
 
@@ -1223,37 +1339,39 @@ mod test {
             Op::Constant(3.0.into()),
             Op::SetGlobal("x".into()),
             Op::Print,
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "3\n");
     }
 
     #[test]
     fn assign_to_undefined_global() {
-        let instructions = vec![Op::SetGlobal("x".into()), Op::Print, Op::Return];
+        let instructions = vec![Op::SetGlobal("x".into()), Op::Print];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Undefined("x".into()))
+        );
     }
 
     #[test]
     fn access_undefined_global() {
-        let instructions = vec![Op::SetGlobal("x".into()), Op::Print, Op::Return];
+        let instructions = vec![Op::SetGlobal("x".into()), Op::Print];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Err(VmError::Undefined("x".into())));
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Undefined("x".into()))
+        );
     }
 
     #[test]
@@ -1266,14 +1384,12 @@ mod test {
             Op::Add,
             Op::Print,
             Op::PopN(2),
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "10\n");
     }
 
@@ -1286,14 +1402,283 @@ mod test {
             Op::GetLocal(0),
             Op::Print,
             Op::PopN(1),
-            Op::Return,
         ];
 
         let mut test_writer = TestWriter::new();
         let mut vm = VirtualMachine::new(&mut test_writer);
-        vm.load(instructions);
 
-        assert_eq!(vm.exec(), Ok(()));
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
         assert_eq!(test_writer.to_string(), "3\n");
+    }
+
+    #[test]
+    fn call_global_void_function_no_args() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 0,
+                chunk: vec![Op::Constant(1.0.into()), Op::Print, Op::VoidReturn].into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(0),
+            Op::Pop,
+            Op::GetGlobal("f".into()),
+            Op::Call(0),
+            Op::Pop,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n1\n");
+    }
+
+    #[test]
+    fn call_global_void_function_with_args() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 2,
+                chunk: vec![
+                    Op::GetLocal(0),
+                    Op::GetLocal(1),
+                    Op::Add,
+                    Op::Print,
+                    Op::VoidReturn,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            // define local variable of 1
+            Op::Constant(1.0.into()),
+            // access that local
+            // note that access of local at 0 also happens in the function defined above - call
+            // frames should manage access for each variable in the proper manner
+            Op::GetLocal(0),
+            Op::Print,
+            // define call args here
+            Op::Constant(2.0.into()),
+            Op::Constant(3.0.into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(2),
+            Op::Pop,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n5\n");
+    }
+
+    #[test]
+    fn call_global_function_no_args() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 0,
+                chunk: vec![Op::Constant(1.0.into()), Op::Return].into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(0),
+            Op::Print,
+            Op::GetGlobal("f".into()),
+            Op::Call(0),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n1\n");
+    }
+
+    #[test]
+    fn call_function_with_interior_locals() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 2,
+                chunk: vec![
+                    Op::GetLocal(0),
+                    Op::GetLocal(1),
+                    Op::Add,
+                    Op::GetLocal(2),
+                    Op::Return,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::GetGlobal("f".into()),
+            Op::Call(2),
+            Op::Print,
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::GetGlobal("f".into()),
+            Op::Call(2),
+            Op::Print,
+            Op::PopN(2),
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        // stack should always be 0 after execution
+        assert_eq!(vm.stack.size(), 0);
+        assert_eq!(test_writer.to_string(), "3\n3\n");
+    }
+
+    #[test]
+    fn call_function_mutate_arg() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 2,
+                chunk: vec![
+                    Op::Constant(3.0.into()),
+                    Op::SetLocal(0),
+                    Op::GetLocal(0),
+                    Op::GetLocal(1),
+                    Op::Add,
+                    Op::Return,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::GetLocal(0),
+            Op::GetLocal(1),
+            Op::GetGlobal("f".into()),
+            Op::Call(2),
+            Op::Print,
+            Op::GetLocal(0),
+            Op::Print,
+            Op::PopN(2),
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        // stack should always be 0 after execution
+        assert_eq!(vm.stack.size(), 0);
+        assert_eq!(test_writer.to_string(), "5\n1\n");
+    }
+
+    #[test]
+    fn provide_call_stack_on_error() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "g".into(),
+                arity: 0,
+                chunk: vec![
+                    Op::Constant("hey".into()),
+                    Op::Constant(1.0.into()),
+                    Op::Add,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("g".into()),
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 0,
+                chunk: vec![Op::GetGlobal("g".into()), Op::Call(0)].into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(0),
+            Op::Pop,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::Type(Type::Number, Type::String))
+        );
+        assert_eq!(vm.call_stack(), vec!["f", "g"].into());
+    }
+
+    #[test]
+    fn error_function_call_with_too_few_args() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 2,
+                chunk: vec![
+                    Op::GetLocal(0),
+                    Op::GetLocal(1),
+                    Op::Add,
+                    Op::GetLocal(2),
+                    Op::Return,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::Constant(1.0.into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(1),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::WrongNumArgs {
+                name: "f".into(),
+                expected: 2,
+                actual: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn error_function_call_with_too_many_args() {
+        let instructions = vec![
+            Op::Constant(Value::Obj(Obj::Function(Function {
+                name: "f".into(),
+                arity: 2,
+                chunk: vec![
+                    Op::GetLocal(0),
+                    Op::GetLocal(1),
+                    Op::Add,
+                    Op::GetLocal(2),
+                    Op::Return,
+                ]
+                .into(),
+            }))),
+            Op::DefineGlobal("f".into()),
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::GetGlobal("f".into()),
+            Op::Call(3),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(
+            vm.exec(instructions.into()),
+            Err(VmError::WrongNumArgs {
+                name: "f".into(),
+                expected: 2,
+                actual: 3,
+            })
+        );
     }
 }

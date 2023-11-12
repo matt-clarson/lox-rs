@@ -3,12 +3,14 @@ use crate::scanner::Span;
 /// A complete statement of the language - this is the highest type of node in the AST.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Declaration {
+    Function {name: Span, args: Box<[Span]>, body: Box<[Declaration]>},
     Var { name: Span, expr: Expression },
     Stmt(Statement),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Statement {
+    Return(Option<Expression>),
     Print(Expression),
     Block(Box<[Declaration]>),
     Expr(Expression),
@@ -35,6 +37,10 @@ pub enum Expression {
     Term(Term),
     Factor(Factor),
     Unary(Unary),
+    Call{
+        callee: Box<Expression>,
+        args: Box<[Expression]>,
+    },
     Primary(Primary),
 }
 

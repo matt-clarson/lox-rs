@@ -1,13 +1,13 @@
 use std::{
     collections::hash_map::RandomState, error::Error, fmt::Display, hash::BuildHasher,
-    num::ParseFloatError,
+    num::ParseFloatError, rc::Rc,
 };
 
 use crate::{
     ast::{Comparison, Declaration, Equality, Expression, Factor, Primary, Statement, Term, Unary},
     parser::{ParseError, Parser},
     scanner::{Scanner, Span},
-    vm::{Op, Value},
+    vm::{Function, Op, Value},
 };
 
 /// Compiles source code to a list of bytecode instructions to be consumed by the
@@ -23,14 +23,70 @@ struct SourceCompiler<'c, H: BuildHasher> {
     locals: Locals<H>,
 }
 
+#[derive(Debug, PartialEq)]
+pub struct Chunk {
+    ops: Vec<Op>,
+}
+
+impl From<Vec<Op>> for Chunk {
+    fn from(ops: Vec<Op>) -> Self {
+        Self { ops }
+    }
+}
+
+impl Chunk {
+    fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    fn push(&mut self, op: Op) {
+        self.ops.push(op);
+    }
+
+    fn into_ref(self) -> Rc<[Op]> {
+        self.ops.into()
+    }
+
+    pub fn iter(&self) -> ChunkIter<'_> {
+        ChunkIter {
+            ops: self.ops.as_slice(),
+            idx: 0,
+        }
+    }
+}
+
+pub struct ChunkIter<'c> {
+    ops: &'c [Op],
+    idx: usize,
+}
+
+impl<'c> ChunkIter<'c> {
+    pub fn new(ops: &'c [Op]) -> Self {
+        Self { ops, idx: 0 }
+    }
+}
+
+impl<'c> Iterator for ChunkIter<'c> {
+    type Item = &'c Op;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let op = self.ops.get(self.idx)?;
+        self.idx += 1;
+        Some(op)
+    }
+}
+
 struct UninitalisedLocal {
     idx: usize,
     depth: usize,
 }
 
 impl UninitalisedLocal {
-    fn initialise<H: BuildHasher>(& self, locals: &mut Locals<H>) -> Result<(), CompileError> {
-        let local = locals.locals.get_mut(self.idx).ok_or(CompileError::Initialise)?;
+    fn initialise<H: BuildHasher>(&self, locals: &mut Locals<H>) -> Result<(), CompileError> {
+        let local = locals
+            .locals
+            .get_mut(self.idx)
+            .ok_or(CompileError::Initialise)?;
         local.depth = Some(self.depth);
         Ok(())
     }
@@ -66,10 +122,9 @@ impl<H: BuildHasher> Locals<H> {
             name,
             depth: None,
         };
-        let depth = Some(depth);
 
         for candidate in self.locals.iter().rev() {
-            if candidate.depth < depth {
+            if candidate.depth < Some(depth) {
                 // no more locals at the target depth
                 break;
             }
@@ -82,7 +137,15 @@ impl<H: BuildHasher> Locals<H> {
 
         self.locals.push(local);
 
-        Ok(UninitalisedLocal { idx: self.locals.len()-1, depth: depth.unwrap() })
+        Ok(UninitalisedLocal {
+            idx: self.locals.len() - 1,
+            depth,
+        })
+    }
+
+    fn define(&mut self, name: Box<str>, depth: usize) -> Result<(), CompileError> {
+        let local = self.declare(name, depth)?;
+        local.initialise(self)
     }
 
     fn resolve<S: AsRef<str>>(&self, name: S) -> Result<Option<usize>, CompileError> {
@@ -135,7 +198,7 @@ impl Compiler {
     }
 
     /// Produces bytecode instructions for the given input string.
-    pub fn compile(&self, source: &str) -> Result<Vec<Op>, CompileError> {
+    pub fn compile(&self, source: &str) -> Result<Chunk, CompileError> {
         let scanner = Scanner::from(source);
         let parser = Parser::from(scanner);
         let mut c = SourceCompiler {
@@ -150,36 +213,69 @@ impl Compiler {
 }
 
 impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
-    fn compile(&mut self) -> Result<Vec<Op>, CompileError> {
-        let mut ops = vec![];
+    fn compile(&mut self) -> Result<Chunk, CompileError> {
+        let mut chunk = Chunk::new();
 
         while let Some(result) = self.parser.next() {
             let declaration = result?;
-            self.compile_declaration(&mut ops, &declaration)?;
+            self.compile_declaration(&mut chunk, &declaration)?;
         }
 
-        // TODO remove this when we get functions
-        ops.push(Op::Return);
-
-        Ok(ops)
+        Ok(chunk)
     }
 
     fn compile_declaration(
         &mut self,
-        ops: &mut Vec<Op>,
+        chunk: &mut Chunk,
         declaration: &Declaration,
     ) -> Result<(), CompileError> {
         match declaration {
-            Declaration::Stmt(stmt) => self.compile_statement(ops, stmt),
+            Declaration::Function { name, args, body } => {
+                // function args are defined in an outer scope
+                self.begin_function_scope();
+                for arg in args.iter() {
+                    let ident = self.span(arg);
+                    self.locals.define(ident.into(), self.scope_depth)?;
+                }
+                // function body is defined in an inner scope
+                self.begin_function_scope();
+                let mut fun_chunk = Chunk::new();
+                for decl in body.iter() {
+                    self.compile_declaration(&mut fun_chunk, decl)?;
+                }
+
+                // end inner scope
+                self.end_function_scope();
+
+                let ident: Rc<str> = self.span(name).into();
+                let fun = Function {
+                    name: Rc::clone(&ident),
+                    arity: args.len() as u8,
+                    chunk: fun_chunk.into_ref(),
+                };
+                chunk.push(Op::Constant(fun.into()));
+
+                // end outer scope
+                self.end_function_scope();
+
+                if self.scope_depth == 0 {
+                    chunk.push(Op::DefineGlobal(ident.into()));
+                } else {
+                    self.locals
+                        .define(ident.as_ref().into(), self.scope_depth)?;
+                }
+                Ok(())
+            }
+            Declaration::Stmt(stmt) => self.compile_statement(chunk, stmt),
             Declaration::Var { name, expr } => {
                 if self.scope_depth == 0 {
-                    self.compile_expression(ops, expr)?;
+                    self.compile_expression(chunk, expr)?;
                     let ident = self.span(name);
-                    ops.push(Op::DefineGlobal(ident.into()));
+                    chunk.push(Op::DefineGlobal(ident.into()));
                 } else {
                     let ident = self.span(name);
                     let local = self.locals.declare(ident.into(), self.scope_depth)?;
-                    self.compile_expression(ops, expr)?;
+                    self.compile_expression(chunk, expr)?;
                     local.initialise(&mut self.locals)?;
                 }
                 Ok(())
@@ -189,31 +285,36 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
 
     fn compile_statement(
         &mut self,
-        ops: &mut Vec<Op>,
+        chunk: &mut Chunk,
         statement: &Statement,
     ) -> Result<(), CompileError> {
         match statement {
+            Statement::Return(Some(expr)) => {
+                self.compile_expression(chunk, expr)?;
+                chunk.push(Op::Return);
+                Ok(())
+            }
+            Statement::Return(None) => {
+                chunk.push(Op::VoidReturn);
+                Ok(())
+            }
             Statement::Print(expr) => {
-                self.compile_expression(ops, expr)?;
-                ops.push(Op::Print);
+                self.compile_expression(chunk, expr)?;
+                chunk.push(Op::Print);
                 Ok(())
             }
             Statement::Block(declarations) => {
-                self.scope_depth += 1;
+                self.begin_scope();
                 for declaration in declarations.iter() {
-                    self.compile_declaration(ops, declaration)?;
+                    self.compile_declaration(chunk, declaration)?;
                 }
-                let n = self.locals.remove_depth(self.scope_depth);
-                if n > 0 {
-                    ops.push(Op::PopN(n));
-                }
-                self.scope_depth -= 1;
+                self.end_scope(chunk);
                 Ok(())
             }
             Statement::Expr(expr) => {
-                let pop_last = self.compile_expression(ops, expr)?;
+                let pop_last = self.compile_expression(chunk, expr)?;
                 if pop_last {
-                    ops.push(Op::Pop);
+                    chunk.push(Op::Pop);
                 }
                 Ok(())
             }
@@ -222,35 +323,35 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
 
     fn compile_expression(
         &self,
-        ops: &mut Vec<Op>,
+        chunk: &mut Chunk,
         expr: &Expression,
     ) -> Result<bool, CompileError> {
         match expr {
             Expression::Primary(Primary::Number(t)) => {
                 let n = self.span(t).parse::<f64>()?;
                 let op = Op::Constant(n.into());
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::True) => {
                 let op = Op::Constant(Value::True);
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::False) => {
                 let op = Op::Constant(Value::False);
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::Nil) => {
                 let op = Op::Constant(Value::Nil);
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::String(t)) => {
                 let s = self.span(&t.inner());
                 let op = Op::Constant(s.into());
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::Ident(t)) => {
@@ -260,95 +361,124 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
                 } else {
                     Op::GetGlobal(s.into())
                 };
-                ops.push(op);
+                chunk.push(op);
                 Ok(true)
             }
             Expression::Primary(Primary::Group(expr)) => {
-                self.compile_expression(ops, expr)?;
+                self.compile_expression(chunk, expr)?;
+                Ok(true)
+            }
+            Expression::Call { callee, args } => {
+                for arg in args.iter() {
+                    self.compile_expression(chunk, arg)?;
+                }
+                self.compile_expression(chunk, callee)?;
+                chunk.push(Op::Call(args.len() as u8));
                 Ok(true)
             }
             Expression::Unary(Unary::Negate(negate)) => {
-                self.compile_expression(ops, negate)?;
-                ops.push(Op::Negate);
+                self.compile_expression(chunk, negate)?;
+                chunk.push(Op::Negate);
                 Ok(true)
             }
             Expression::Unary(Unary::Not(not)) => {
-                self.compile_expression(ops, not)?;
-                ops.push(Op::Not);
+                self.compile_expression(chunk, not)?;
+                chunk.push(Op::Not);
                 Ok(true)
             }
             Expression::Factor(Factor::Multiply { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::Multiply);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::Multiply);
                 Ok(true)
             }
             Expression::Factor(Factor::Divide { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::Divide);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::Divide);
                 Ok(true)
             }
             Expression::Term(Term::Plus { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::Add);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::Add);
                 Ok(true)
             }
             Expression::Term(Term::Minus { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::Subtract);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::Subtract);
                 Ok(true)
             }
             Expression::Comparison(Comparison::LessThan { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::LessThan);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::LessThan);
                 Ok(true)
             }
             Expression::Comparison(Comparison::LessThanOrEquals { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::LessThanOrEqual);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::LessThanOrEqual);
                 Ok(true)
             }
             Expression::Comparison(Comparison::GreaterThan { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::GreaterThan);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::GreaterThan);
                 Ok(true)
             }
             Expression::Comparison(Comparison::GreaterThanOrEquals { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::GreaterThanOrEqual);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::GreaterThanOrEqual);
                 Ok(true)
             }
             Expression::Equality(Equality::Equals { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::Equals);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::Equals);
                 Ok(true)
             }
             Expression::Equality(Equality::NotEquals { left, right }) => {
-                self.compile_expression(ops, left)?;
-                self.compile_expression(ops, right)?;
-                ops.push(Op::NotEquals);
+                self.compile_expression(chunk, left)?;
+                self.compile_expression(chunk, right)?;
+                chunk.push(Op::NotEquals);
                 Ok(true)
             }
             Expression::Assignment { ident, expr } => {
-                self.compile_expression(ops, expr)?;
+                self.compile_expression(chunk, expr)?;
                 let s = self.span(ident);
                 if let Some(idx) = self.locals.resolve(s)? {
-                    ops.push(Op::SetLocal(idx));
+                    chunk.push(Op::SetLocal(idx));
                     Ok(false)
                 } else {
-                    ops.push(Op::SetGlobal(s.into()));
+                    chunk.push(Op::SetGlobal(s.into()));
                     Ok(true)
                 }
             }
         }
+    }
+
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn begin_function_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self, chunk: &mut Chunk) {
+        let n = self.locals.remove_depth(self.scope_depth);
+        if n > 0 {
+            chunk.push(Op::PopN(n));
+        }
+        self.scope_depth -= 1;
+    }
+
+    fn end_function_scope(&mut self) {
+        self.locals.remove_depth(self.scope_depth);
+        self.scope_depth -= 1;
     }
 
     fn span(&self, t: &Span) -> &str {
@@ -365,7 +495,7 @@ pub enum CompileError {
     InvalidNumber(ParseFloatError),
     RedefineVar(Box<str>),
     CircularDef(Box<str>),
-    Initialise
+    Initialise,
 }
 
 impl Display for CompileError {
@@ -378,7 +508,7 @@ impl Display for CompileError {
                 f,
                 "cannot read variable in its own initialiser: variable '{s}'"
             ),
-            Self::Initialise => f.write_str("error initialising local variable")
+            Self::Initialise => f.write_str("error initialising local variable"),
         }
     }
 }
@@ -399,7 +529,7 @@ impl From<ParseFloatError> for CompileError {
 
 #[cfg(test)]
 mod test {
-    use crate::vm::Obj;
+    use crate::vm::{Function, Obj};
 
     use super::*;
 
@@ -411,7 +541,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::Number(1.4)), Op::Pop, Op::Return].into())
+            Ok(vec![Op::Constant(Value::Number(1.4)), Op::Pop].into())
         );
     }
 
@@ -423,7 +553,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::True), Op::Pop, Op::Return].into())
+            Ok(vec![Op::Constant(Value::True), Op::Pop].into())
         );
     }
 
@@ -435,7 +565,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::False), Op::Pop, Op::Return].into())
+            Ok(vec![Op::Constant(Value::False), Op::Pop].into())
         );
     }
 
@@ -447,7 +577,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::Nil), Op::Pop, Op::Return].into())
+            Ok(vec![Op::Constant(Value::Nil), Op::Pop].into())
         );
     }
 
@@ -462,7 +592,6 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Obj(Obj::String("hello".into()))),
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -476,7 +605,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::False), Op::Not, Op::Pop, Op::Return].into())
+            Ok(vec![Op::Constant(Value::False), Op::Not, Op::Pop].into())
         );
     }
 
@@ -488,13 +617,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![
-                Op::Constant(Value::Number(1.4)),
-                Op::Negate,
-                Op::Pop,
-                Op::Return
-            ]
-            .into())
+            Ok(vec![Op::Constant(Value::Number(1.4)), Op::Negate, Op::Pop,].into())
         );
     }
 
@@ -511,7 +634,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Add,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -530,7 +652,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Subtract,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -551,7 +672,6 @@ mod test {
                 Op::Constant(Value::Obj(Obj::String("world".into()))),
                 Op::Add,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -570,7 +690,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Multiply,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -589,7 +708,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Divide,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -608,7 +726,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::LessThan,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -627,7 +744,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::LessThanOrEqual,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -646,7 +762,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::GreaterThan,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -665,7 +780,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::GreaterThanOrEqual,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -684,7 +798,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::Equals,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -703,7 +816,6 @@ mod test {
                 Op::Constant(Value::Number(6.5)),
                 Op::NotEquals,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -724,7 +836,6 @@ mod test {
                 Op::Add,
                 Op::Multiply,
                 Op::Pop,
-                Op::Return
             ]
             .into())
         );
@@ -738,7 +849,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::Constant(Value::Number(123.0)), Op::Print, Op::Return].into())
+            Ok(vec![Op::Constant(Value::Number(123.0)), Op::Print].into())
         );
     }
 
@@ -753,7 +864,6 @@ mod test {
             Ok(vec![
                 Op::Constant(Value::Number(7.0)),
                 Op::DefineGlobal("x".into()),
-                Op::Return
             ]
             .into())
         );
@@ -767,12 +877,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![
-                Op::Constant(Value::Nil),
-                Op::DefineGlobal("x".into()),
-                Op::Return
-            ]
-            .into())
+            Ok(vec![Op::Constant(Value::Nil), Op::DefineGlobal("x".into()),].into())
         );
     }
 
@@ -784,7 +889,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![Op::GetGlobal("x".into()), Op::Pop, Op::Return].into())
+            Ok(vec![Op::GetGlobal("x".into()), Op::Pop].into())
         );
     }
 
@@ -796,13 +901,7 @@ mod test {
 
         assert_eq!(
             compiler.compile(s),
-            Ok(vec![
-                Op::Constant(7.0.into()),
-                Op::SetGlobal("x".into()),
-                Op::Pop,
-                Op::Return
-            ]
-            .into())
+            Ok(vec![Op::Constant(7.0.into()), Op::SetGlobal("x".into()), Op::Pop,].into())
         );
     }
 
@@ -825,7 +924,6 @@ mod test {
                 Op::Print,
                 Op::Constant(2.0.into()),
                 Op::Print,
-                Op::Return
             ]
             .into())
         );
@@ -837,7 +935,7 @@ mod test {
 
         let compiler = Compiler::default();
 
-        assert_eq!(compiler.compile(s), Ok(vec![Op::Return].into()));
+        assert_eq!(compiler.compile(s), Ok(vec![].into()));
     }
 
     #[test]
@@ -863,7 +961,6 @@ mod test {
                 Op::Add,
                 Op::Print,
                 Op::PopN(2),
-                Op::Return
             ]
             .into())
         );
@@ -912,7 +1009,6 @@ mod test {
                 Op::Print,
                 Op::PopN(1),
                 Op::PopN(1),
-                Op::Return
             ]
             .into())
         );
@@ -961,7 +1057,279 @@ mod test {
                 Op::GetLocal(0),
                 Op::Print,
                 Op::PopN(1),
-                Op::Return
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_void_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    print 123;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 0,
+                    chunk: vec![Op::Constant(123.0.into()), Op::Print, Op::VoidReturn].into()
+                }))),
+                Op::DefineGlobal("f".into()),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_returning_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    return 123;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 0,
+                    chunk: vec![Op::Constant(123.0.into()), Op::Return].into()
+                }))),
+                Op::DefineGlobal("f".into()),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_returning_empty_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    return;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 0,
+                    chunk: vec![Op::VoidReturn].into()
+                }))),
+                Op::DefineGlobal("f".into()),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_void_function_one_arg_no_locals() {
+        let s = "
+fun f(a) {
+    print a;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 1,
+                    chunk: vec![Op::GetLocal(0), Op::Print, Op::VoidReturn].into()
+                }))),
+                Op::DefineGlobal("f".into()),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_void_function_two_args_no_locals() {
+        let s = "
+fun f(a, b) {
+    print a + b;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 2,
+                    chunk: vec![
+                        Op::GetLocal(0),
+                        Op::GetLocal(1),
+                        Op::Add,
+                        Op::Print,
+                        Op::VoidReturn
+                    ]
+                    .into()
+                }))),
+                Op::DefineGlobal("f".into()),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_function_call_no_args() {
+        let s = "f();";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![Op::GetGlobal("f".into()), Op::Call(0), Op::Pop,].into())
+        );
+    }
+
+    #[test]
+    fn compile_function_call_one_arg() {
+        let s = "f(1);";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(1.0.into()),
+                Op::GetGlobal("f".into()),
+                Op::Call(1),
+                Op::Pop,
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_function_call_two_args() {
+        let s = "f(1, 2);";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(1.0.into()),
+                Op::Constant(2.0.into()),
+                Op::GetGlobal("f".into()),
+                Op::Call(2),
+                Op::Pop,
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_multi_function_call() {
+        let s = "f()();";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![Op::GetGlobal("f".into()), Op::Call(0), Op::Call(0), Op::Pop,].into())
+        );
+    }
+
+    #[test]
+    fn compile_local_defined_function_call() {
+        let s = "
+{
+    fun f(a, b) {
+        print a + b;
+    }
+
+    f(1, 2);
+    f(3, 4);
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 2,
+                    chunk: vec![
+                        Op::GetLocal(0),
+                        Op::GetLocal(1),
+                        Op::Add,
+                        Op::Print,
+                        Op::VoidReturn,
+                    ]
+                    .into()
+                }))),
+                Op::Constant(1.0.into()),
+                Op::Constant(2.0.into()),
+                Op::GetLocal(0),
+                Op::Call(2),
+                Op::Pop,
+                Op::Constant(3.0.into()),
+                Op::Constant(4.0.into()),
+                Op::GetLocal(0),
+                Op::Call(2),
+                Op::Pop,
+                Op::PopN(1),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_function_with_locals() {
+        let s = "
+fun f(a, b) {
+    var s = a + b;
+    return s;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Obj(Obj::Function(Function {
+                    name: "f".into(),
+                    arity: 2,
+                    chunk: vec![
+                        Op::GetLocal(0),
+                        Op::GetLocal(1),
+                        Op::Add,
+                        Op::GetLocal(2),
+                        Op::Return
+                    ]
+                    .into()
+                }))),
+                Op::DefineGlobal("f".into())
             ]
             .into())
         );

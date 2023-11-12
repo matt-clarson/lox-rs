@@ -1,17 +1,13 @@
-use std::{error::Error, io, vec::IntoIter};
+use std::{error::Error, io};
 
 use rustyline::{error::ReadlineError, DefaultEditor};
 
-use crate::{
-    compiler::Compiler,
-    vm::{Op, VirtualMachine},
-    Config,
-};
+use crate::{compiler::Compiler, vm::VirtualMachine, Config};
 
 /// Read, Execute, Print, Loop implementation for Lox.
 pub struct Repl {
     compiler: Compiler,
-    vm: VirtualMachine<IntoIter<Op>, io::Stdout>,
+    vm: VirtualMachine<io::Stdout>,
     editor: DefaultEditor,
 }
 
@@ -53,8 +49,7 @@ impl Repl {
                         }
                     };
 
-                    self.vm.load(ops);
-                    if let Err(err) = self.vm.exec() {
+                    if let Err(err) = self.vm.exec(ops) {
                         println!("Error: {err}");
                     }
                 }

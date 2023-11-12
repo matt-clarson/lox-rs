@@ -37,11 +37,72 @@ type ParseResult<T> = Result<T, ParseError>;
 impl<'s> Parser<'s> {
     fn declaration(&mut self) -> ParseResult<Declaration> {
         match self.current()? {
+            Token::Fun(_) => {
+                self.advance()?;
+                self.function_declaration()
+            }
             Token::Var(_) => {
                 self.advance()?;
                 self.var_declaration()
             }
             _ => self.statement(),
+        }
+    }
+
+    fn function_declaration(&mut self) -> ParseResult<Declaration> {
+        let name = self.take_ident()?;
+        self.take_left_paren()?;
+        let mut args = vec![];
+        loop {
+            if let Token::Identifier(span) = self.current()? {
+                self.advance()?;
+                args.push(span);
+            }
+            if let Token::Comma(_) = self.current()? {
+                self.advance()?;
+                continue;
+            } else {
+                break;
+            }
+        }
+        self.take_right_paren()?;
+        self.take_left_brace()?;
+
+        let mut body = vec![];
+
+        loop {
+            match self.current()? {
+                Token::RightBrace(_) => {
+                    let has_return =
+                        matches!(body.last(), Some(Declaration::Stmt(Statement::Return(_))));
+                    if !has_return {
+                        body.push(Declaration::Stmt(Statement::Return(None)));
+                    }
+                    let decl = Declaration::Function {
+                        name,
+                        args: args.into(),
+                        body: body.into(),
+                    };
+                    return self.advance().and(Ok(decl));
+                }
+                Token::Return(_) => {
+                    self.advance()?;
+                    let decl = match self.current()? {
+                        Token::Semicolon(_) => {
+                            let decl = Declaration::Stmt(Statement::Return(None));
+                            self.advance()?;
+                            decl
+                        }
+                        _ => {
+                            let expr = self.expression()?;
+                            self.take_semicolon()?;
+                            Declaration::Stmt(Statement::Return(Some(expr)))
+                        }
+                    };
+                    body.push(decl);
+                }
+                _ => body.push(self.declaration()?),
+            }
         }
     }
 
@@ -191,13 +252,57 @@ impl<'s> Parser<'s> {
     fn unary(&mut self) -> ParseResult<Expression> {
         match self.current()? {
             Token::Minus(_) => Ok(Expression::Unary(Unary::Negate(Box::new(
-                self.advance().and_then(|_| self.primary())?,
+                self.advance().and_then(|_| self.call())?,
             )))),
             Token::Bang(_) => Ok(Expression::Unary(Unary::Not(Box::new(
-                self.advance().and_then(|_| self.primary())?,
+                self.advance().and_then(|_| self.call())?,
             )))),
-            _ => self.primary(),
+            _ => self.call(),
         }
+    }
+
+    fn call(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.primary()?;
+
+        while let Some(args) = self.call_args()? {
+            expr = Expression::Call{
+                callee: expr.into(),
+                args
+            };
+        }
+
+        Ok(expr)
+    }
+
+    fn call_args(&mut self) -> Result<Option<Box<[Expression]>>, ParseError> {
+        let mut args = vec![];
+
+        let next_is_left_paren = matches!(self.current()?, Token::LeftParen(_));
+        if !next_is_left_paren {
+            return Ok(None)
+        }
+
+        self.advance()?;
+
+        let next_is_right_paren = matches!(self.current()?, Token::RightParen(_));
+        if next_is_right_paren {
+            self.advance()?;
+            return Ok(Some(args.into()));
+        }
+
+        loop {
+            args.push(self.expression()?);
+
+            let next_is_comma = matches!(self.current()?, Token::Comma(_));
+            if !next_is_comma {
+                break;
+            }
+            self.advance()?
+        }
+
+        self.take_right_paren()?;
+
+        Ok(Some(args.into()))
     }
 
     fn primary(&mut self) -> ParseResult<Expression> {
@@ -243,11 +348,31 @@ impl<'s> Parser<'s> {
         }
     }
 
+    fn take_left_paren(&mut self) -> ParseResult<Span> {
+        match self.current()? {
+            Token::LeftParen(t) => self.advance().and(Ok(t)),
+            token => Err(ParseError::WrongToken(WrongToken {
+                wanted: "(",
+                actual: token,
+            })),
+        }
+    }
+
     fn take_right_paren(&mut self) -> ParseResult<Span> {
         match self.current()? {
             Token::RightParen(t) => self.advance().and(Ok(t)),
             token => Err(ParseError::WrongToken(WrongToken {
                 wanted: ")",
+                actual: token,
+            })),
+        }
+    }
+
+    fn take_left_brace(&mut self) -> ParseResult<Span> {
+        match self.current()? {
+            Token::LeftBrace(t) => self.advance().and(Ok(t)),
+            token => Err(ParseError::WrongToken(WrongToken {
+                wanted: "{",
                 actual: token,
             })),
         }
@@ -1137,6 +1262,304 @@ mod test {
         assert_eq!(
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Block(vec![].into()))))
+        );
+    }
+
+    #[test]
+    fn parse_void_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    print 123;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Function {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1,
+                },
+                args: vec![].into(),
+                body: vec![
+                    Declaration::Stmt(Statement::Print(Expression::Primary(Primary::Number(
+                        Span {
+                            start: 20,
+                            length: 3,
+                            line: 2,
+                        }
+                    )))),
+                    Declaration::Stmt(Statement::Return(None))
+                ]
+                .into()
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_returning_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    return 123;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Function {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1,
+                },
+                args: vec![].into(),
+                body: vec![Declaration::Stmt(Statement::Return(Some(
+                    Expression::Primary(Primary::Number(Span {
+                        start: 21,
+                        length: 3,
+                        line: 2,
+                    }))
+                ))),]
+                .into()
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_returning_empty_function_no_args_no_locals() {
+        let s = "
+fun f() {
+    return;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Function {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1,
+                },
+                args: vec![].into(),
+                body: vec![Declaration::Stmt(Statement::Return(None)),].into()
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_void_function_one_arg_no_locals() {
+        let s = "
+fun f(a) {
+    print a;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Function {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1,
+                },
+                args: vec![Span {
+                    start: 6,
+                    length: 1,
+                    line: 1
+                }]
+                .into(),
+                body: vec![
+                    Declaration::Stmt(Statement::Print(Expression::Primary(Primary::Ident(
+                        Span {
+                            start: 21,
+                            length: 1,
+                            line: 2
+                        }
+                    )))),
+                    Declaration::Stmt(Statement::Return(None))
+                ]
+                .into()
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_void_function_two_args_no_locals() {
+        let s = "
+fun f(a, b) {
+    print a + b;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Function {
+                name: Span {
+                    start: 4,
+                    length: 1,
+                    line: 1,
+                },
+                args: vec![
+                    Span {
+                        start: 6,
+                        length: 1,
+                        line: 1
+                    },
+                    Span {
+                        start: 9,
+                        length: 1,
+                        line: 1
+                    }
+                ]
+                .into(),
+                body: vec![
+                    Declaration::Stmt(Statement::Print(Expression::Term(Term::Plus {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 24,
+                            length: 1,
+                            line: 2,
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 28,
+                            length: 1,
+                            line: 2
+                        })))
+                    }))),
+                    Declaration::Stmt(Statement::Return(None))
+                ]
+                .into()
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_function_call_no_args() {
+        let s = "f();";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Call {
+                callee: Box::new(Expression::Primary(Primary::Ident(Span {
+                    start: 0,
+                    length: 1,
+                    line: 1
+                }))),
+                args: vec![].into()
+            }))))
+        );
+    }
+
+    #[test]
+    fn parse_function_call_one_arg() {
+        let s = "f(1);";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Call {
+                callee: Box::new(Expression::Primary(Primary::Ident(Span {
+                    start: 0,
+                    length: 1,
+                    line: 1
+                }))),
+                args: vec![Expression::Primary(Primary::Number(Span {
+                    start: 2,
+                    length: 1,
+                    line: 1
+                }))]
+                .into()
+            }))))
+        );
+    }
+
+    #[test]
+    fn parse_function_call_two_args() {
+        let s = "f(1, 2);";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Call {
+                callee: Box::new(Expression::Primary(Primary::Ident(Span {
+                    start: 0,
+                    length: 1,
+                    line: 1
+                }))),
+                args: vec![
+                    Expression::Primary(Primary::Number(Span {
+                        start: 2,
+                        length: 1,
+                        line: 1
+                    })),
+                    Expression::Primary(Primary::Number(Span {
+                        start: 5,
+                        length: 1,
+                        line: 1
+                    }))
+                ]
+                .into()
+            }))))
+        );
+    }
+
+    #[test]
+    fn parse_multi_function_call() {
+        let s = "f()();";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Call {
+                callee: Box::new(Expression::Call {
+                    callee: Box::new(Expression::Primary(Primary::Ident(Span {
+                        start: 0,
+                        length: 1,
+                        line: 1
+                    }))),
+                    args: vec![].into()
+                }),
+                args: vec![].into()
+            }))))
         );
     }
 }

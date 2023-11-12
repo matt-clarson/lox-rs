@@ -31,10 +31,7 @@
 //! print breakfast;";
 //! let ops = compiler.compile(source).unwrap();
 //!
-//! // need to make sure the compiler output is loaded into the vm before calling `exec`
-//! vm.load(ops);
-//!
-//! vm.exec().unwrap();
+//! vm.exec(ops).unwrap();
 //! assert_eq!(String::from_utf8(buf), Ok(String::from("\"beignets with cafe au lait\"\n")));
 //! ```
 
@@ -73,7 +70,6 @@ pub fn interpret<P: AsRef<Path>>(file: P, config: &Config) -> Result<(), Box<dyn
     let source = fs::read_to_string(file)?;
 
     let ops = compiler.compile(&source)?;
-    vm.load(ops);
 
-    vm.exec().map_err(Into::into)
+    vm.exec(ops).map_err(Into::into)
 }

@@ -45,7 +45,7 @@ impl<'s> Parser<'s> {
                 self.advance()?;
                 self.var_declaration()
             }
-            _ => self.statement(),
+            _ => self.statement().map(Declaration::Stmt),
         }
     }
 
@@ -66,85 +66,144 @@ impl<'s> Parser<'s> {
             }
         }
         self.take_right_paren()?;
-        self.take_left_brace()?;
 
-        let mut body = vec![];
+        let mut body = self.block()?;
+        let has_return = matches!(body.last(), Some(Declaration::Stmt(Statement::Return(_))));
+        if !has_return {
+            body.push(Declaration::Stmt(Statement::Return(None)));
+        }
+        Ok(Declaration::Function {
+            name,
+            args: args.into(),
+            body: body.into(),
+        })
+    }
 
-        loop {
-            match self.current()? {
-                Token::RightBrace(_) => {
-                    let has_return =
-                        matches!(body.last(), Some(Declaration::Stmt(Statement::Return(_))));
-                    if !has_return {
-                        body.push(Declaration::Stmt(Statement::Return(None)));
+    fn var_declaration(&mut self) -> ParseResult<Declaration> {
+        let var = self.var()?;
+        self.take_semicolon().and(Ok(Declaration::Var(var)))
+    }
+
+    fn statement(&mut self) -> ParseResult<Statement> {
+        match self.current()? {
+            Token::Print(_) => {
+                self.advance()?;
+                let stmt = Statement::Print(self.expression()?);
+                self.take_semicolon().and(Ok(stmt))
+            }
+            Token::Return(_) => {
+                self.advance()?;
+                let next_is_semicolon = matches!(self.current()?, Token::Semicolon(_));
+                if next_is_semicolon {
+                    return self.advance().and(Ok(Statement::Return(None)));
+                }
+                let stmt = Statement::Return(Some(self.expression()?));
+                self.take_semicolon().and(Ok(stmt))
+            }
+            Token::If(_) => {
+                self.advance()?;
+                self.take_left_paren()?;
+                let condition = self.expression()?;
+                self.take_right_paren()?;
+                let body = self.statement()?.into();
+
+                let has_else = !self.finished() && matches!(self.current()?, Token::Else(_));
+                if !has_else {
+                    return Ok(Statement::If {
+                        condition,
+                        body,
+                        else_body: None,
+                    });
+                }
+
+                self.advance()?;
+
+                let else_body = self.statement()?.into();
+
+                Ok(Statement::If {
+                    condition,
+                    body,
+                    else_body: Some(else_body),
+                })
+            }
+            Token::While(_) => {
+                self.advance()?;
+                self.take_left_paren()?;
+                let condition = self.expression()?;
+                self.take_right_paren()?;
+
+                let body = self.statement()?.into();
+
+                Ok(Statement::While { condition, body })
+            }
+            Token::For(_) => {
+                self.advance()?;
+                self.take_left_paren()?;
+                let initialiser = match self.current()? {
+                    Token::Var(_) => {
+                        self.advance()?;
+                        let var = self.var()?;
+                        self.take_semicolon()?;
+                        Some(ForInitialiser::Var(var))
                     }
-                    let decl = Declaration::Function {
-                        name,
-                        args: args.into(),
-                        body: body.into(),
-                    };
-                    return self.advance().and(Ok(decl));
-                }
-                Token::Return(_) => {
+                    Token::Semicolon(_) => {
+                        self.advance()?;
+                        None
+                    }
+                    _ => {
+                        let expr = self.expression()?;
+                        self.take_semicolon()?;
+                        Some(ForInitialiser::Expr(expr))
+                    }
+                };
+
+                let condition = if let Token::Semicolon(_) = self.current()? {
                     self.advance()?;
-                    let decl = match self.current()? {
-                        Token::Semicolon(_) => {
-                            let decl = Declaration::Stmt(Statement::Return(None));
-                            self.advance()?;
-                            decl
-                        }
-                        _ => {
-                            let expr = self.expression()?;
-                            self.take_semicolon()?;
-                            Declaration::Stmt(Statement::Return(Some(expr)))
-                        }
-                    };
-                    body.push(decl);
-                }
-                _ => body.push(self.declaration()?),
+                    None
+                } else {
+                    let expr = self.expression()?;
+                    self.take_semicolon()?;
+                    Some(expr)
+                };
+
+                let incrementer = if let Token::RightParen(_) = self.current()? {
+                    self.advance()?;
+                    None
+                } else {
+                    let expr = self.expression()?;
+                    self.take_right_paren()?;
+                    Some(expr)
+                };
+
+                let body = self.statement()?.into();
+
+                Ok(Statement::For {
+                    initialiser,
+                    condition,
+                    incrementer,
+                    body,
+                })
+            }
+            Token::LeftBrace(_) => self.block().map(Into::into).map(Statement::Block),
+            _ => {
+                let stmt = Statement::Expr(self.expression()?);
+                self.take_semicolon().and(Ok(stmt))
             }
         }
     }
 
-    fn var_declaration(&mut self) -> ParseResult<Declaration> {
-        let name = self.take_ident()?;
-        let expr = if let Token::Equal(_) = self.current()? {
-            self.advance()?;
-            self.expression()?
-        } else {
-            Expression::Primary(Primary::Nil)
-        };
+    fn block(&mut self) -> ParseResult<Vec<Declaration>> {
+        self.take_left_brace()?;
+        let mut contents = vec![];
 
-        let decl = Declaration::Var { name, expr };
-        self.take_semicolon().and(Ok(decl))
-    }
+        loop {
+            let next_is_right_brace = matches!(self.current()?, Token::RightBrace(_));
+            if next_is_right_brace {
+                self.advance()?;
+                return Ok(contents);
+            }
 
-    fn statement(&mut self) -> ParseResult<Declaration> {
-        match self.current()? {
-            Token::Print(_) => {
-                self.advance()?;
-                let stmt = Declaration::Stmt(Statement::Print(self.expression()?));
-                self.take_semicolon().and(Ok(stmt))
-            }
-            Token::LeftBrace(_) => {
-                self.advance()?;
-                let mut contents: Vec<Declaration> = vec![];
-                loop {
-                    match self.current()? {
-                        Token::RightBrace(_) => {
-                            let stmt = Declaration::Stmt(Statement::Block(contents.into()));
-                            return self.advance().and(Ok(stmt));
-                        }
-                        _ => {
-                            contents.push(self.declaration()?);
-                        }
-                    }
-                }
-            }
-            _ => {
-                let stmt = Declaration::Stmt(Statement::Expr(self.expression()?));
-                self.take_semicolon().and(Ok(stmt))
-            }
+            contents.push(self.declaration()?);
         }
     }
 
@@ -155,8 +214,38 @@ impl<'s> Parser<'s> {
                 let expr = Box::new(self.expression()?);
                 Ok(Expression::Assignment { ident, expr })
             }
-            _ => self.equality(),
+            _ => self.or(),
         }
+    }
+
+    fn or(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.and()?;
+
+        while let Token::Or(_) = self.current()? {
+            self.advance()?;
+            let right = self.and()?.into();
+            expr = Expression::Or {
+                left: expr.into(),
+                right,
+            }
+        }
+
+        Ok(expr)
+    }
+
+    fn and(&mut self) -> ParseResult<Expression> {
+        let mut expr = self.equality()?;
+
+        while let Token::And(_) = self.current()? {
+            self.advance()?;
+            let right = self.equality()?.into();
+            expr = Expression::And {
+                left: expr.into(),
+                right,
+            }
+        }
+
+        Ok(expr)
     }
 
     fn equality(&mut self) -> ParseResult<Expression> {
@@ -265,9 +354,9 @@ impl<'s> Parser<'s> {
         let mut expr = self.primary()?;
 
         while let Some(args) = self.call_args()? {
-            expr = Expression::Call{
+            expr = Expression::Call {
                 callee: expr.into(),
-                args
+                args,
             };
         }
 
@@ -279,7 +368,7 @@ impl<'s> Parser<'s> {
 
         let next_is_left_paren = matches!(self.current()?, Token::LeftParen(_));
         if !next_is_left_paren {
-            return Ok(None)
+            return Ok(None);
         }
 
         self.advance()?;
@@ -326,6 +415,18 @@ impl<'s> Parser<'s> {
             Token::False(_) => self.advance().and(Ok(Expression::Primary(Primary::False))),
             token => Err(ParseError::UnexpectedToken(token)),
         }
+    }
+
+    fn var(&mut self) -> ParseResult<Var> {
+        let name = self.take_ident()?;
+        let expr = if let Token::Equal(_) = self.current()? {
+            self.advance()?;
+            self.expression()?
+        } else {
+            Expression::Primary(Primary::Nil)
+        };
+
+        Ok(Var { name, expr })
     }
 
     fn take_ident(&mut self) -> ParseResult<Span> {
@@ -1085,7 +1186,7 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Declaration::Var {
+            Some(Ok(Declaration::Var(Var {
                 name: Span {
                     start: 4,
                     length: 1,
@@ -1096,7 +1197,7 @@ mod test {
                     length: 1,
                     line: 1
                 }))
-            }))
+            })))
         );
     }
 
@@ -1110,14 +1211,14 @@ mod test {
 
         assert_eq!(
             parser.next(),
-            Some(Ok(Declaration::Var {
+            Some(Ok(Declaration::Var(Var {
                 name: Span {
                     start: 4,
                     length: 1,
                     line: 1
                 },
                 expr: Expression::Primary(Primary::Nil)
-            }))
+            })))
         );
     }
 
@@ -1221,7 +1322,7 @@ mod test {
             parser.next(),
             Some(Ok(Declaration::Stmt(Statement::Block(
                 vec![
-                    Declaration::Var {
+                    Declaration::Var(Var {
                         name: Span {
                             start: 10,
                             length: 1,
@@ -1232,7 +1333,7 @@ mod test {
                             length: 1,
                             line: 2,
                         }))
-                    },
+                    }),
                     Declaration::Stmt(Statement::Print(Expression::Factor(Factor::Multiply {
                         left: Box::new(Expression::Primary(Primary::Ident(Span {
                             start: 27,
@@ -1560,6 +1661,524 @@ fun f(a, b) {
                 }),
                 args: vec![].into()
             }))))
+        );
+    }
+
+    #[test]
+    fn parse_if_statement() {
+        let s = "
+if (true) {
+    print \"hello\";
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::If {
+                condition: Expression::Primary(Primary::True),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::String(Span {
+                            start: 22,
+                            length: 7,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                )),
+                else_body: None
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_if_statement_no_block() {
+        let s = "if (true) return 1;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::If {
+                condition: Expression::Primary(Primary::True),
+                body: Box::new(Statement::Return(Some(Expression::Primary(
+                    Primary::Number(Span {
+                        start: 17,
+                        length: 1,
+                        line: 1
+                    })
+                )))),
+                else_body: None
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_if_else_statement() {
+        let s = "
+if (true) {
+    print \"hello\";
+} else {
+    print \"goodbye\";
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::If {
+                condition: Expression::Primary(Primary::True),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::String(Span {
+                            start: 22,
+                            length: 7,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                )),
+                else_body: Some(Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::String(Span {
+                            start: 50,
+                            length: 9,
+                            line: 4
+                        })
+                    )))]
+                    .into()
+                )))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_or_expression() {
+        let s = "true or false;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::Or {
+                left: Box::new(Expression::Primary(Primary::True)),
+                right: Box::new(Expression::Primary(Primary::False))
+            }))))
+        );
+    }
+
+    #[test]
+    fn parse_and_expression() {
+        let s = "true and false;";
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::Expr(Expression::And {
+                left: Box::new(Expression::Primary(Primary::True)),
+                right: Box::new(Expression::Primary(Primary::False))
+            }))))
+        );
+    }
+
+    #[test]
+    fn parse_while_loop() {
+        let s = "
+while (true) {
+    print \"loop\";
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::While {
+                condition: Expression::Primary(Primary::True),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::String(Span {
+                            start: 25,
+                            length: 6,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_common_for_loop() {
+        let s = "
+for (var i=0; i<5; i=i+1) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: Some(ForInitialiser::Var(Var {
+                    name: Span {
+                        start: 9,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Expression::Primary(Primary::Number(Span {
+                        start: 11,
+                        length: 1,
+                        line: 1
+                    }))
+                })),
+                condition: Some(Expression::Comparison(Comparison::LessThan {
+                    left: Box::new(Expression::Primary(Primary::Ident(Span {
+                        start: 14,
+                        length: 1,
+                        line: 1
+                    }))),
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 16,
+                        length: 1,
+                        line: 1
+                    })))
+                })),
+                incrementer: Some(Expression::Assignment {
+                    ident: Span {
+                        start: 19,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Term(Term::Plus {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 21,
+                            length: 1,
+                            line: 1
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 23,
+                            length: 1,
+                            line: 1
+                        })))
+                    }))
+                }),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 38,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_for_loop_expression_initialiser() {
+        let s = "
+for (i=0; i<5; i=i+1) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: Some(ForInitialiser::Expr(Expression::Assignment{
+                    ident: Span{
+                        start: 5, length: 1, line: 1
+                    },
+                    expr: Box::new(Expression::Primary(Primary::Number(Span{
+                        start: 7, length: 1, line: 1
+                    })))
+                })),
+                condition: Some(Expression::Comparison(Comparison::LessThan {
+                    left: Box::new(Expression::Primary(Primary::Ident(Span {
+                        start: 10,
+                        length: 1,
+                        line: 1
+                    }))),
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 12,
+                        length: 1,
+                        line: 1
+                    })))
+                })),
+                incrementer: Some(Expression::Assignment {
+                    ident: Span {
+                        start: 15,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Term(Term::Plus {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 17,
+                            length: 1,
+                            line: 1
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 19,
+                            length: 1,
+                            line: 1
+                        })))
+                    }))
+                }),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 34,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_for_loop_no_initialiser() {
+        let s = "
+for (; i<5; i=i+1) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: None,
+                condition: Some(Expression::Comparison(Comparison::LessThan {
+                    left: Box::new(Expression::Primary(Primary::Ident(Span {
+                        start: 7,
+                        length: 1,
+                        line: 1
+                    }))),
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 9,
+                        length: 1,
+                        line: 1
+                    })))
+                })),
+                incrementer: Some(Expression::Assignment {
+                    ident: Span {
+                        start: 12,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Term(Term::Plus {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 14,
+                            length: 1,
+                            line: 1
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 16,
+                            length: 1,
+                            line: 1
+                        })))
+                    }))
+                }),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 31,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_for_loop_no_condition() {
+        let s = "
+for (var i=0;; i=i+1) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: Some(ForInitialiser::Var(Var {
+                    name: Span {
+                        start: 9,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Expression::Primary(Primary::Number(Span {
+                        start: 11,
+                        length: 1,
+                        line: 1
+                    }))
+                })),
+                condition: None,
+                incrementer: Some(Expression::Assignment {
+                    ident: Span {
+                        start: 15,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Box::new(Expression::Term(Term::Plus {
+                        left: Box::new(Expression::Primary(Primary::Ident(Span {
+                            start: 17,
+                            length: 1,
+                            line: 1
+                        }))),
+                        right: Box::new(Expression::Primary(Primary::Number(Span {
+                            start: 19,
+                            length: 1,
+                            line: 1
+                        })))
+                    }))
+                }),
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 34,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_for_loop_no_incrementer() {
+        let s = "
+for (var i=0; i<5;) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: Some(ForInitialiser::Var(Var {
+                    name: Span {
+                        start: 9,
+                        length: 1,
+                        line: 1
+                    },
+                    expr: Expression::Primary(Primary::Number(Span {
+                        start: 11,
+                        length: 1,
+                        line: 1
+                    }))
+                })),
+                condition: Some(Expression::Comparison(Comparison::LessThan {
+                    left: Box::new(Expression::Primary(Primary::Ident(Span {
+                        start: 14,
+                        length: 1,
+                        line: 1
+                    }))),
+                    right: Box::new(Expression::Primary(Primary::Number(Span {
+                        start: 16,
+                        length: 1,
+                        line: 1
+                    })))
+                })),
+                incrementer: None,
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 32,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
+        );
+    }
+
+    #[test]
+    fn parse_empty_for_loop() {
+        let s = "
+for (;;) {
+    print i;
+}
+        "
+        .trim();
+
+        let scanner = Scanner::from(s);
+
+        let mut parser = Parser::from(scanner);
+
+        assert_eq!(
+            parser.next(),
+            Some(Ok(Declaration::Stmt(Statement::For {
+                initialiser: None,
+                condition: None,
+                incrementer: None,
+                body: Box::new(Statement::Block(
+                    vec![Declaration::Stmt(Statement::Print(Expression::Primary(
+                        Primary::Ident(Span {
+                            start: 21,
+                            length: 1,
+                            line: 2
+                        })
+                    )))]
+                    .into()
+                ))
+            })))
         );
     }
 }

@@ -81,35 +81,34 @@ impl<W: Write> VirtualMachine<W> {
         Ok(())
     }
 
-    fn exec_ops(&mut self, ops: ChunkIter<'_>) -> Result<Value, VmError> {
-        for op in ops {
+    fn exec_ops(&mut self, mut ops: ChunkIter<'_>) -> Result<Value, VmError> {
+        while let Some(op) = ops.next() {
             if self.debug {
                 self.print_debug(op);
             }
 
-            let r = self.process_op(op);
-
-            if let Ok(Some(value)) = r {
-                return Ok(value);
-            } else if let Err(err) = r {
-                return Err(err);
+            match self.process_op(op) {
+                Ok(ProcessedOp::Value(value)) => return Ok(value),
+                Ok(ProcessedOp::Jump(idx)) => ops.jump(idx),
+                Ok(ProcessedOp::None) => continue,
+                Err(err) => return Err(err),
             }
         }
 
         Ok(Value::Nil)
     }
 
-    fn process_op(&mut self, op: &Op) -> Result<Option<Value>, VmError> {
+    fn process_op(&mut self, op: &Op) -> Result<ProcessedOp, VmError> {
         match op {
             Op::Constant(value) => self.push_value(value.clone()),
             Op::Not => match self.stack.peek_mut() {
                 Some(v @ Value::True) => {
                     let _ = mem::replace(v, Value::False);
-                    Ok(None)
+                    Ok(ProcessedOp::None)
                 }
                 Some(v @ Value::False) => {
                     let _ = mem::replace(v, Value::True);
-                    Ok(None)
+                    Ok(ProcessedOp::None)
                 }
                 Some(Value::Number(_)) => Err(VmError::Type(Type::Bool, Type::Number)),
                 Some(Value::Nil) => Err(VmError::Type(Type::Bool, Type::Nil)),
@@ -120,17 +119,14 @@ impl<W: Write> VirtualMachine<W> {
                 None => Err(VmError::NoValue),
             },
             Op::Negate => self.modify_number(|n| -n),
-            Op::Add => match self.stack.peek() {
-                Some(Value::Number(_)) => self.binary_op_number(|a, b| a + b),
-                Some(Value::Obj(Obj::String(_))) => {
+            Op::Add => match self.peek_value()? {
+                Value::Number(_) => self.binary_op_number(|a, b| a + b),
+                Value::Obj(Obj::String(_)) => {
                     self.binary_op_string(|a, b| (String::from(a) + b).into())
                 }
-                Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
-                Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
-                Some(Value::Obj(Obj::Function(_))) => {
-                    Err(VmError::Type(Type::Number, Type::Function))
-                }
-                None => Err(VmError::NoValue),
+                Value::True | Value::False => Err(VmError::Type(Type::Number, Type::Bool)),
+                Value::Nil => Err(VmError::Type(Type::Number, Type::Nil)),
+                Value::Obj(Obj::Function(_)) => Err(VmError::Type(Type::Number, Type::Function)),
             },
             Op::Subtract => self.binary_op_number(|a, b| a - b),
             Op::Multiply => self.binary_op_number(|a, b| a * b),
@@ -153,12 +149,16 @@ impl<W: Write> VirtualMachine<W> {
             Op::NotEquals => self
                 .pop_two_values()
                 .and_then(|(v1, v2)| self.push_bool(!self.values_eq(&v1, &v2))),
-            Op::Return => self.pop_value().map(Some),
-            Op::VoidReturn => Ok(Some(Value::Nil)),
-            Op::Pop => self.stack.pop().ok_or(VmError::NoValue).and(Ok(None)),
+            Op::Return => self.pop_value().map(ProcessedOp::Value),
+            Op::VoidReturn => Ok(ProcessedOp::Value(Value::Nil)),
+            Op::Pop => self
+                .stack
+                .pop()
+                .ok_or(VmError::NoValue)
+                .and(Ok(ProcessedOp::None)),
             Op::PopN(n) => {
                 self.stack.popn(*n);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::Print => {
                 let v = self.stack.pop().ok_or(VmError::NoValue)?;
@@ -167,13 +167,13 @@ impl<W: Write> VirtualMachine<W> {
                 }
                 self.stdout.write_all(v.to_string().as_bytes())?;
                 self.stdout.write_all(b"\n")?;
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::DefineGlobal(ident) => {
                 let interned = unsafe { self.intern_string(ident.as_ref_str()) };
                 let value = self.pop_value()?;
                 self.globals.insert(interned, value);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::GetGlobal(ident) => {
                 let s = unsafe { ident.as_ref_str() };
@@ -190,18 +190,18 @@ impl<W: Write> VirtualMachine<W> {
                 }
                 let new_value = self.clone_value()?;
                 self.globals.insert(s, new_value);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::GetLocal(idx) => {
                 let pos = self.stack_pos(*idx);
                 self.stack.copy_to_top(pos);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::SetLocal(idx) => {
-                let value = self.pop_value()?;
+                let value = self.clone_value()?;
                 let pos = self.stack_pos(*idx);
                 self.stack.insert(pos, value);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Op::Call(n) => {
                 let function = self.pop_function()?;
@@ -210,7 +210,7 @@ impl<W: Write> VirtualMachine<W> {
                     return Err(VmError::WrongNumArgs {
                         name: function.name.as_ref().into(),
                         expected: function.arity,
-                        actual: *n
+                        actual: *n,
                     });
                 }
 
@@ -229,6 +229,33 @@ impl<W: Write> VirtualMachine<W> {
                 self.stack.truncate(offset);
 
                 self.push_value(return_value)
+            }
+            Op::JumpIfFalse(idx) => {
+                let value = self.pop_value()?;
+                if value.is_falsey() {
+                    Ok(ProcessedOp::Jump(*idx))
+                } else {
+                    Ok(ProcessedOp::None)
+                }
+            }
+            Op::Jump(idx) => Ok(ProcessedOp::Jump(*idx)),
+            Op::JumpOr(idx) => {
+                let value = self.peek_value()?;
+                if !value.is_falsey() {
+                    Ok(ProcessedOp::Jump(*idx))
+                } else {
+                    self.stack.pop();
+                    Ok(ProcessedOp::None)
+                }
+            }
+            Op::JumpAnd(idx) => {
+                let value = self.peek_value()?;
+                if value.is_falsey() {
+                    Ok(ProcessedOp::Jump(*idx))
+                } else {
+                    self.stack.pop();
+                    Ok(ProcessedOp::None)
+                }
             }
         }
     }
@@ -266,31 +293,31 @@ impl<W: Write> VirtualMachine<W> {
         }
     }
 
-    fn push_value(&mut self, value: Value) -> Result<Option<Value>, VmError> {
+    fn push_value(&mut self, value: Value) -> Result<ProcessedOp, VmError> {
         match value {
             Value::Obj(Obj::String(s)) => self.push_string(s),
             v => {
                 self.stack.push(v);
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
         }
     }
 
-    fn push_string(&mut self, s: Rc<str>) -> Result<Option<Value>, VmError> {
+    fn push_string(&mut self, s: Rc<str>) -> Result<ProcessedOp, VmError> {
         let interned = self.intern_string(s);
         self.stack.push(interned.into());
-        Ok(None)
+        Ok(ProcessedOp::None)
     }
 
-    fn push_bool(&mut self, b: bool) -> Result<Option<Value>, VmError> {
+    fn push_bool(&mut self, b: bool) -> Result<ProcessedOp, VmError> {
         self.stack.push(if b { Value::True } else { Value::False });
-        Ok(None)
+        Ok(ProcessedOp::None)
     }
 
     fn binary_op_number<F: FnOnce(f64, f64) -> f64>(
         &mut self,
         f: F,
-    ) -> Result<Option<Value>, VmError> {
+    ) -> Result<ProcessedOp, VmError> {
         self.pop_number()
             .and_then(|a| self.modify_number(|b| f(b, a)))
     }
@@ -298,7 +325,7 @@ impl<W: Write> VirtualMachine<W> {
     fn binary_op_string<F: FnOnce(&str, &str) -> Rc<str>>(
         &mut self,
         f: F,
-    ) -> Result<Option<Value>, VmError> {
+    ) -> Result<ProcessedOp, VmError> {
         self.pop_two_strings()
             .and_then(|(a, b)| self.push_string(f(&a, &b)))
     }
@@ -358,6 +385,10 @@ impl<W: Write> VirtualMachine<W> {
         }
     }
 
+    fn peek_value(&mut self) -> Result<&Value, VmError> {
+        self.stack.peek().ok_or(VmError::NoValue)
+    }
+
     fn clone_value(&mut self) -> Result<Value, VmError> {
         match self.stack.peek() {
             Some(v) => Ok(v.clone()),
@@ -365,11 +396,11 @@ impl<W: Write> VirtualMachine<W> {
         }
     }
 
-    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<Option<Value>, VmError> {
+    fn modify_number<F: FnOnce(f64) -> f64>(&mut self, f: F) -> Result<ProcessedOp, VmError> {
         match self.stack.peek_mut() {
             Some(Value::Number(n)) => {
                 let _ = mem::replace(n, f(*n));
-                Ok(None)
+                Ok(ProcessedOp::None)
             }
             Some(Value::True | Value::False) => Err(VmError::Type(Type::Number, Type::Bool)),
             Some(Value::Nil) => Err(VmError::Type(Type::Number, Type::Nil)),
@@ -397,6 +428,12 @@ impl<W: Write> VirtualMachine<W> {
         println!("  -- stack ({}) --", self.stack.size());
         println!("{}", self.stack);
     }
+}
+
+enum ProcessedOp {
+    Value(Value),
+    Jump(usize),
+    None,
 }
 
 struct CallFrame {
@@ -470,6 +507,13 @@ pub enum Op {
     SetLocal(usize),
     /// Pop the top value off the stack, then call it, creating a new call frame. Errors of the value is not a Function. The wrapped number is the number of args provided by the invoker, used to ensure the same number of args as params are provided.
     Call(u8),
+    /// Pop the top value off the stack, and evaluate it for falsey-ness - if the value is falsey,
+    /// jump to the provided index in the instructions array.
+    JumpIfFalse(usize),
+    /// Jump to the provided index in the instructions array, without touching the VM stack.
+    Jump(usize),
+    JumpOr(usize),
+    JumpAnd(usize),
 }
 
 impl Display for Op {
@@ -499,6 +543,10 @@ impl Display for Op {
             Self::GetLocal(idx) => write!(f, "OP_GETL {idx}"),
             Self::SetLocal(idx) => write!(f, "OP_SETL {idx}"),
             Self::Call(n) => write!(f, "OP_CALL {n}"),
+            Self::JumpIfFalse(idx) => write!(f, "OP_JMPF {idx}"),
+            Self::Jump(idx) => write!(f, "OP_JMP  {idx}"),
+            Self::JumpOr(idx) => write!(f, "OP_JMPO {idx}"),
+            Self::JumpAnd(idx) => write!(f, "OP_JMPA {idx}"),
         }
     }
 }
@@ -622,6 +670,15 @@ impl Value {
             panic!("value is not a string")
         }
     }
+
+    fn is_falsey(&self) -> bool {
+        match self {
+            Value::Nil | Value::False => true,
+            Value::Number(n) if *n == 0.0 => true,
+            Value::Obj(Obj::String(s)) if s.len() == 0 => true,
+            _ => false,
+        }
+    }
 }
 
 impl Debug for Value {
@@ -737,7 +794,7 @@ pub enum VmError {
     WrongNumArgs {
         name: Box<str>,
         expected: u8,
-        actual: u8
+        actual: u8,
     },
 }
 
@@ -780,7 +837,11 @@ impl Display for VmError {
             Self::Io(s) => write!(f, "io error: {s}"),
             Self::Undefined(s) => write!(f, "undefined variable: {s}"),
             Self::NotCallable(t) => write!(f, "not callable: value of type {t} is not callable"),
-            Self::WrongNumArgs { name, expected, actual } => {
+            Self::WrongNumArgs {
+                name,
+                expected,
+                actual,
+            } => {
                 write!(f, "wrong number of args: function {name} needs {expected} args, {actual} were provided")
             }
         }
@@ -1680,5 +1741,323 @@ mod test {
                 actual: 3,
             })
         );
+    }
+
+    #[test]
+    fn jump_if_false_with_false() {
+        let instructions = vec![
+            Op::Constant(Value::False),
+            Op::JumpIfFalse(4),
+            Op::Constant("is true".into()),
+            Op::Print,
+            Op::Constant("after".into()),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "\"after\"\n");
+    }
+
+    #[test]
+    fn jump_if_false_with_true() {
+        let instructions = vec![
+            Op::Constant(Value::True),
+            Op::JumpIfFalse(4),
+            Op::Constant("is true".into()),
+            Op::Print,
+            Op::Constant("after".into()),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "\"is true\"\n\"after\"\n");
+    }
+
+    #[test]
+    fn jump_if_false_and_else_with_false() {
+        let instructions = vec![
+            Op::Constant(Value::False),
+            Op::JumpIfFalse(5),
+            Op::Constant("is true".into()),
+            Op::Print,
+            Op::Jump(7),
+            Op::Constant("is false".into()),
+            Op::Print,
+            Op::Constant("after".into()),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "\"is false\"\n\"after\"\n");
+    }
+
+    #[test]
+    fn jump_if_false_and_else_with_true() {
+        let instructions = vec![
+            Op::Constant(Value::True),
+            Op::JumpIfFalse(5),
+            Op::Constant("is true".into()),
+            Op::Print,
+            Op::Jump(7),
+            Op::Constant("is false".into()),
+            Op::Print,
+            Op::Constant("after".into()),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "\"is true\"\n\"after\"\n");
+    }
+
+    #[test]
+    fn jump_or_true_true_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::JumpOr(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\n");
+    }
+
+    #[test]
+    fn jump_or_true_false_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::JumpOr(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\n");
+    }
+
+    #[test]
+    fn jump_or_false_true_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::JumpOr(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\n");
+    }
+
+    #[test]
+    fn jump_or_false_false_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::JumpOr(7),
+            Op::Constant(3.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\n");
+    }
+
+    #[test]
+    fn jump_or_does_not_evaluate_right_expr_if_left_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::JumpOr(5),
+            Op::Constant(3.0.into()),
+            Op::SetLocal(0),
+            Op::Pop,
+            Op::GetLocal(0),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n");
+    }
+
+    #[test]
+    fn jump_or_does_evaluate_right_expr_if_left_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(0.0.into()),
+            Op::JumpOr(5),
+            Op::Constant(3.0.into()),
+            Op::SetLocal(0),
+            Op::Pop,
+            Op::GetLocal(0),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "3\n");
+    }
+
+    #[test]
+    fn jump_and_true_true_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::JumpAnd(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "true\n");
+    }
+
+    #[test]
+    fn jump_and_true_false_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::JumpAnd(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(1.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\n");
+    }
+
+    #[test]
+    fn jump_and_false_true_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::JumpAnd(7),
+            Op::Constant(2.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\n");
+    }
+
+    #[test]
+    fn jump_and_false_false_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::JumpAnd(7),
+            Op::Constant(3.0.into()),
+            Op::Constant(2.0.into()),
+            Op::Equals,
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "false\n");
+    }
+
+    #[test]
+    fn jump_and_does_not_evaluate_right_expr_if_left_is_false() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(0.0.into()),
+            Op::JumpAnd(5),
+            Op::Constant(3.0.into()),
+            Op::SetLocal(0),
+            Op::Pop,
+            Op::GetLocal(0),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "1\n");
+    }
+
+    #[test]
+    fn jump_and_does_evaluate_right_expr_if_left_is_true() {
+        let instructions = vec![
+            Op::Constant(1.0.into()),
+            Op::Constant(2.0.into()),
+            Op::JumpAnd(5),
+            Op::Constant(3.0.into()),
+            Op::SetLocal(0),
+            Op::Pop,
+            Op::GetLocal(0),
+            Op::Print,
+        ];
+
+        let mut test_writer = TestWriter::new();
+        let mut vm = VirtualMachine::new(&mut test_writer);
+
+        assert_eq!(vm.exec(instructions.into()), Ok(()));
+        assert_eq!(test_writer.to_string(), "3\n");
     }
 }

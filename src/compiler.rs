@@ -1,10 +1,13 @@
 use std::{
-    collections::hash_map::RandomState, error::Error, fmt::Display, hash::BuildHasher,
+    collections::hash_map::RandomState, error::Error, fmt::Display, hash::BuildHasher, mem,
     num::ParseFloatError, rc::Rc,
 };
 
 use crate::{
-    ast::{Comparison, Declaration, Equality, Expression, Factor, Primary, Statement, Term, Unary},
+    ast::{
+        Comparison, Declaration, Equality, Expression, Factor, ForInitialiser, Primary, Statement,
+        Term, Unary, Var,
+    },
     parser::{ParseError, Parser},
     scanner::{Scanner, Span},
     vm::{Function, Op, Value},
@@ -47,6 +50,10 @@ impl Chunk {
         self.ops.into()
     }
 
+    fn len(&self) -> usize {
+        self.ops.len()
+    }
+
     pub fn iter(&self) -> ChunkIter<'_> {
         ChunkIter {
             ops: self.ops.as_slice(),
@@ -63,6 +70,10 @@ pub struct ChunkIter<'c> {
 impl<'c> ChunkIter<'c> {
     pub fn new(ops: &'c [Op]) -> Self {
         Self { ops, idx: 0 }
+    }
+
+    pub fn jump(&mut self, idx: usize) {
+        self.idx = idx
     }
 }
 
@@ -266,20 +277,8 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
                 }
                 Ok(())
             }
+            Declaration::Var(var) => self.compile_var(chunk, var),
             Declaration::Stmt(stmt) => self.compile_statement(chunk, stmt),
-            Declaration::Var { name, expr } => {
-                if self.scope_depth == 0 {
-                    self.compile_expression(chunk, expr)?;
-                    let ident = self.span(name);
-                    chunk.push(Op::DefineGlobal(ident.into()));
-                } else {
-                    let ident = self.span(name);
-                    let local = self.locals.declare(ident.into(), self.scope_depth)?;
-                    self.compile_expression(chunk, expr)?;
-                    local.initialise(&mut self.locals)?;
-                }
-                Ok(())
-            }
         }
     }
 
@@ -289,6 +288,74 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
         statement: &Statement,
     ) -> Result<(), CompileError> {
         match statement {
+            Statement::If {
+                condition,
+                body,
+                else_body,
+            } => {
+                self.compile_expression(chunk, condition)?;
+                let jump_if = self.jump_if_false(chunk);
+                self.compile_statement(chunk, body)?;
+                if let Some(else_body) = else_body {
+                    let jump_else = self.jump(chunk);
+                    jump_if.patch(chunk);
+                    self.compile_statement(chunk, else_body)?;
+                    jump_else.patch(chunk);
+                } else {
+                    jump_if.patch(chunk);
+                }
+                Ok(())
+            }
+            Statement::While { condition, body } => {
+                let condition_idx = chunk.len();
+                self.compile_expression(chunk, condition)?;
+                let jump = self.jump_if_false(chunk);
+                self.compile_statement(chunk, body)?;
+                chunk.push(Op::Jump(condition_idx));
+                jump.patch(chunk);
+                Ok(())
+            }
+            Statement::For {
+                initialiser,
+                condition,
+                incrementer,
+                body,
+            } => {
+                self.begin_scope();
+                match initialiser {
+                    Some(ForInitialiser::Var(var)) => self.compile_var(chunk, var)?,
+                    Some(ForInitialiser::Expr(expr)) => {
+                        self.compile_expression(chunk, expr)?;
+                    }
+                    None => (),
+                };
+                let loop_idx = chunk.len();
+
+                if let Some(expr) = condition {
+                    self.compile_expression(chunk, expr)?;
+                    let jump = self.jump_if_false(chunk);
+                    self.compile_statement(chunk, body)?;
+
+                    if let Some(expr) = incrementer {
+                        self.compile_expression(chunk, expr)?;
+                        chunk.push(Op::Pop);
+                    }
+
+                    chunk.push(Op::Jump(loop_idx));
+                    jump.patch(chunk);
+                } else {
+                    self.compile_statement(chunk, body)?;
+
+                    if let Some(expr) = incrementer {
+                        self.compile_expression(chunk, expr)?;
+                        chunk.push(Op::Pop);
+                    }
+
+                    chunk.push(Op::Jump(loop_idx));
+                }
+                self.end_scope(chunk);
+                Ok(())
+            }
             Statement::Return(Some(expr)) => {
                 self.compile_expression(chunk, expr)?;
                 chunk.push(Op::Return);
@@ -312,47 +379,55 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
                 Ok(())
             }
             Statement::Expr(expr) => {
-                let pop_last = self.compile_expression(chunk, expr)?;
-                if pop_last {
-                    chunk.push(Op::Pop);
-                }
+                self.compile_expression(chunk, expr)?;
+                chunk.push(Op::Pop);
                 Ok(())
             }
         }
     }
 
-    fn compile_expression(
-        &self,
-        chunk: &mut Chunk,
-        expr: &Expression,
-    ) -> Result<bool, CompileError> {
+    fn compile_var(&mut self, chunk: &mut Chunk, var: &Var) -> Result<(), CompileError> {
+        if self.scope_depth == 0 {
+            self.compile_expression(chunk, &var.expr)?;
+            let ident = self.span(&var.name);
+            chunk.push(Op::DefineGlobal(ident.into()));
+        } else {
+            let ident = self.span(&var.name);
+            let local = self.locals.declare(ident.into(), self.scope_depth)?;
+            self.compile_expression(chunk, &var.expr)?;
+            local.initialise(&mut self.locals)?;
+        }
+        Ok(())
+    }
+
+    fn compile_expression(&self, chunk: &mut Chunk, expr: &Expression) -> Result<(), CompileError> {
         match expr {
             Expression::Primary(Primary::Number(t)) => {
                 let n = self.span(t).parse::<f64>()?;
                 let op = Op::Constant(n.into());
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::True) => {
                 let op = Op::Constant(Value::True);
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::False) => {
                 let op = Op::Constant(Value::False);
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::Nil) => {
                 let op = Op::Constant(Value::Nil);
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::String(t)) => {
                 let s = self.span(&t.inner());
                 let op = Op::Constant(s.into());
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::Ident(t)) => {
                 let s = self.span(t);
@@ -362,11 +437,11 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
                     Op::GetGlobal(s.into())
                 };
                 chunk.push(op);
-                Ok(true)
+                Ok(())
             }
             Expression::Primary(Primary::Group(expr)) => {
                 self.compile_expression(chunk, expr)?;
-                Ok(true)
+                Ok(())
             }
             Expression::Call { callee, args } => {
                 for arg in args.iter() {
@@ -374,87 +449,101 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
                 }
                 self.compile_expression(chunk, callee)?;
                 chunk.push(Op::Call(args.len() as u8));
-                Ok(true)
+                Ok(())
             }
             Expression::Unary(Unary::Negate(negate)) => {
                 self.compile_expression(chunk, negate)?;
                 chunk.push(Op::Negate);
-                Ok(true)
+                Ok(())
             }
             Expression::Unary(Unary::Not(not)) => {
                 self.compile_expression(chunk, not)?;
                 chunk.push(Op::Not);
-                Ok(true)
+                Ok(())
             }
             Expression::Factor(Factor::Multiply { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::Multiply);
-                Ok(true)
+                Ok(())
             }
             Expression::Factor(Factor::Divide { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::Divide);
-                Ok(true)
+                Ok(())
             }
             Expression::Term(Term::Plus { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::Add);
-                Ok(true)
+                Ok(())
             }
             Expression::Term(Term::Minus { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::Subtract);
-                Ok(true)
+                Ok(())
             }
             Expression::Comparison(Comparison::LessThan { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::LessThan);
-                Ok(true)
+                Ok(())
             }
             Expression::Comparison(Comparison::LessThanOrEquals { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::LessThanOrEqual);
-                Ok(true)
+                Ok(())
             }
             Expression::Comparison(Comparison::GreaterThan { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::GreaterThan);
-                Ok(true)
+                Ok(())
             }
             Expression::Comparison(Comparison::GreaterThanOrEquals { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::GreaterThanOrEqual);
-                Ok(true)
+                Ok(())
             }
             Expression::Equality(Equality::Equals { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::Equals);
-                Ok(true)
+                Ok(())
             }
             Expression::Equality(Equality::NotEquals { left, right }) => {
                 self.compile_expression(chunk, left)?;
                 self.compile_expression(chunk, right)?;
                 chunk.push(Op::NotEquals);
-                Ok(true)
+                Ok(())
+            }
+            Expression::Or { left, right } => {
+                self.compile_expression(chunk, left)?;
+                let jump = self.jump_or(chunk);
+                self.compile_expression(chunk, right)?;
+                jump.patch(chunk);
+                Ok(())
+            }
+            Expression::And { left, right } => {
+                self.compile_expression(chunk, left)?;
+                let jump = self.jump_and(chunk);
+                self.compile_expression(chunk, right)?;
+                jump.patch(chunk);
+                Ok(())
             }
             Expression::Assignment { ident, expr } => {
                 self.compile_expression(chunk, expr)?;
                 let s = self.span(ident);
                 if let Some(idx) = self.locals.resolve(s)? {
                     chunk.push(Op::SetLocal(idx));
-                    Ok(false)
+                    Ok(())
                 } else {
                     chunk.push(Op::SetGlobal(s.into()));
-                    Ok(true)
+                    Ok(())
                 }
             }
         }
@@ -483,6 +572,53 @@ impl<'c, H: BuildHasher> SourceCompiler<'c, H> {
 
     fn span(&self, t: &Span) -> &str {
         unsafe { self.source.get_unchecked(t.start..t.start + t.length) }
+    }
+
+    fn jump_if_false(&self, chunk: &mut Chunk) -> PatchableJump {
+        let idx = chunk.ops.len();
+        chunk.push(Op::JumpIfFalse(0));
+        PatchableJump::IfFalse(idx)
+    }
+
+    fn jump(&self, chunk: &mut Chunk) -> PatchableJump {
+        let idx = chunk.ops.len();
+        chunk.push(Op::Jump(0));
+        PatchableJump::Absolute(idx)
+    }
+
+    fn jump_or(&self, chunk: &mut Chunk) -> PatchableJump {
+        let idx = chunk.ops.len();
+        chunk.push(Op::JumpOr(0));
+        PatchableJump::Or(idx)
+    }
+
+    fn jump_and(&self, chunk: &mut Chunk) -> PatchableJump {
+        let idx = chunk.ops.len();
+        chunk.push(Op::JumpAnd(0));
+        PatchableJump::And(idx)
+    }
+}
+
+enum PatchableJump {
+    Absolute(usize),
+    IfFalse(usize),
+    Or(usize),
+    And(usize),
+}
+
+impl PatchableJump {
+    fn patch(self, chunk: &mut Chunk) {
+        let jump_idx = chunk.ops.len();
+        let (idx, jump) = match self {
+            Self::Absolute(idx) => (idx, Op::Jump(jump_idx)),
+            Self::IfFalse(idx) => (idx, Op::JumpIfFalse(jump_idx)),
+            Self::Or(idx) => (idx, Op::JumpOr(jump_idx)),
+            Self::And(idx) => (idx, Op::JumpAnd(jump_idx)),
+        };
+        unsafe {
+            let op = chunk.ops.get_unchecked_mut(idx);
+            let _ = mem::replace(op, jump);
+        }
     }
 }
 
@@ -1054,6 +1190,7 @@ mod test {
                 Op::Constant(1.0.into()),
                 Op::Constant(2.0.into()),
                 Op::SetLocal(0),
+                Op::Pop,
                 Op::GetLocal(0),
                 Op::Print,
                 Op::PopN(1),
@@ -1330,6 +1467,270 @@ fun f(a, b) {
                     .into()
                 }))),
                 Op::DefineGlobal("f".into())
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_if_statement() {
+        let s = "
+if (false) {
+    print \"is false\";
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::False),
+                Op::JumpIfFalse(4),
+                Op::Constant("is false".into()),
+                Op::Print
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_if_else_statement() {
+        let s = "
+if (false) {
+    print \"is false\";
+} else {
+    print \"is not false\";
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::False),
+                Op::JumpIfFalse(5),
+                Op::Constant("is false".into()),
+                Op::Print,
+                Op::Jump(7),
+                Op::Constant("is not false".into()),
+                Op::Print
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_or_expression() {
+        let s = "true or false;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::True),
+                Op::JumpOr(3),
+                Op::Constant(Value::False),
+                Op::Pop
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_and_expression() {
+        let s = "true and false;";
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::True),
+                Op::JumpAnd(3),
+                Op::Constant(Value::False),
+                Op::Pop
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_while_loop() {
+        let s = "
+while (true) {
+    print \"loop\";
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::True),
+                Op::JumpIfFalse(5),
+                Op::Constant("loop".into()),
+                Op::Print,
+                Op::Jump(0),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_common_for_loop() {
+        let s = "
+for (var i=0; i<5; i = i + 1) {
+    print i;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(0.0.into()),
+                Op::GetLocal(0),
+                Op::Constant(5.0.into()),
+                Op::LessThan,
+                Op::JumpIfFalse(13),
+                Op::GetLocal(0),
+                Op::Print,
+                Op::GetLocal(0),
+                Op::Constant(1.0.into()),
+                Op::Add,
+                Op::SetLocal(0),
+                Op::Pop,
+                Op::Jump(1),
+                Op::PopN(1),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_for_loop_expression_initialiser() {
+        let s = "
+var i;
+for (i=0; i<5; i = i + 1) {
+    print i;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(Value::Nil),
+                Op::DefineGlobal("i".into()),
+                Op::Constant(0.0.into()),
+                Op::SetGlobal("i".into()),
+                Op::GetGlobal("i".into()),
+                Op::Constant(5.0.into()),
+                Op::LessThan,
+                Op::JumpIfFalse(16),
+                Op::GetGlobal("i".into()),
+                Op::Print,
+                Op::GetGlobal("i".into()),
+                Op::Constant(1.0.into()),
+                Op::Add,
+                Op::SetGlobal("i".into()),
+                Op::Pop,
+                Op::Jump(4),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_for_loop_no_initialiser() {
+        let s = "
+var i=0;
+for (; true; i = i + 1) {
+    print i;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(0.0.into()),
+                Op::DefineGlobal("i".into()),
+                Op::Constant(Value::True),
+                Op::JumpIfFalse(12),
+                Op::GetGlobal("i".into()),
+                Op::Print,
+                Op::GetGlobal("i".into()),
+                Op::Constant(1.0.into()),
+                Op::Add,
+                Op::SetGlobal("i".into()),
+                Op::Pop,
+                Op::Jump(2),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_for_loop_no_condition() {
+        let s = "
+var i=0;
+for (;; i = i + 1) {
+    print i;
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant(0.0.into()),
+                Op::DefineGlobal("i".into()),
+                Op::GetGlobal("i".into()),
+                Op::Print,
+                Op::GetGlobal("i".into()),
+                Op::Constant(1.0.into()),
+                Op::Add,
+                Op::SetGlobal("i".into()),
+                Op::Pop,
+                Op::Jump(2),
+            ]
+            .into())
+        );
+    }
+
+    #[test]
+    fn compile_empty_for_loop() {
+        let s = "
+for (;;) {
+    print \"loop\";
+}
+        "
+        .trim();
+
+        let compiler = Compiler::default();
+
+        assert_eq!(
+            compiler.compile(s),
+            Ok(vec![
+                Op::Constant("loop".into()),
+                Op::Print,
+                Op::Jump(0),
             ]
             .into())
         );

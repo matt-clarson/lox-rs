@@ -3,17 +3,48 @@ use crate::scanner::Span;
 /// A complete statement of the language - this is the highest type of node in the AST.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Declaration {
-    Function {name: Span, args: Box<[Span]>, body: Box<[Declaration]>},
-    Var { name: Span, expr: Expression },
+    Function {
+        name: Span,
+        args: Box<[Span]>,
+        body: Box<[Declaration]>,
+    },
+    Var (Var),
     Stmt(Statement),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Statement {
+    If {
+        condition: Expression,
+        body: Box<Statement>,
+        else_body: Option<Box<Statement>>
+    },
+    While{
+        condition: Expression,
+        body: Box<Statement>
+    },
+    For {
+        initialiser: Option<ForInitialiser>,
+        condition: Option<Expression>,
+        incrementer: Option<Expression>,
+        body: Box<Statement>
+    },
     Return(Option<Expression>),
     Print(Expression),
     Block(Box<[Declaration]>),
     Expr(Expression),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum ForInitialiser {
+    Expr(Expression),
+    Var(Var)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Var {
+    pub name: Span,
+    pub expr: Expression
 }
 
 impl From<Statement> for Declaration {
@@ -31,13 +62,18 @@ impl From<Expression> for Declaration {
 /// A single expression.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Expression {
-    Assignment { ident: Span, expr: Box<Expression> },
+    Assignment {
+        ident: Span,
+        expr: Box<Expression>,
+    },
+    Or{left: Box<Expression>, right: Box<Expression>},
+    And{left: Box<Expression>, right: Box<Expression>},
     Equality(Equality),
     Comparison(Comparison),
     Term(Term),
     Factor(Factor),
     Unary(Unary),
-    Call{
+    Call {
         callee: Box<Expression>,
         args: Box<[Expression]>,
     },
